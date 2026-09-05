@@ -31,6 +31,7 @@ import { cluster, classifyMachine, circuitMap, type MachineState } from "./histo
 import { api, querySeries } from "./api";
 import { runTick, runRollup } from "./sampler";
 import { thinSeries } from "./store";
+import { pipeReport } from "./pipes";
 import { dash } from "./dash";
 
 type Props = { user: string };
@@ -554,6 +555,31 @@ function buildServer(env: Env): McpServer {
         const sorted = tooSlow.sort((a, b) => b.machineRatePerMin - b.capPerMin - (a.machineRatePerMin - a.capPerMin));
         const base = { beltsConsidered: belts.length, tooSlow: { count: sorted.length, rows: sorted.slice(0, limit) } };
         return only_problems ? base : { ...base, tiers: Object.values(tiers).sort((a: any, b: any) => a.tier - b.tier), dangling: { count: belts.filter((b) => b.Connected0 === false || b.Connected1 === false).length, rows: dangling } };
+      }),
+  );
+
+  server.registerTool(
+    "pipe_load",
+    {
+      description:
+        "Pipes by tier: count, flow cap (m³/min), total length, and every unconnected pipe end, classified by what it is touching. " +
+        "A free end sitting inside a junction's, pump's, valve's, or machine's bounding box is reported as phantom: it snapped visually but never joined the fluid network " +
+        "(the failure mode of mod-placed junction connectors; a bank fed through one starves with no other symptom). Free ends in open air are listed separately as open. " +
+        "Run it after any pipe build, before trusting a flow indicator. bbox is in map units (cm).",
+      inputSchema: z.object({
+        bbox: z.object({ min_x: z.number(), min_y: z.number(), max_x: z.number(), max_y: z.number() }).optional(),
+        only_problems: z.boolean().default(false).describe("skip the per-tier summary and open-end list; just the phantom connections"),
+        limit: z.number().int().min(1).max(300).default(50),
+      }),
+    },
+    async ({ bbox, only_problems, limit }) =>
+      guard(async () => {
+        const opt = (e: any) => frmGet(env, e).catch(() => []);
+        const [pipes, junctions, pumps, factory, generators, extractors] = await Promise.all([
+          frmGet(env, "getPipes"), opt("getPipeJunctions"), opt("getPump"), opt("getFactory"), opt("getGenerators"), opt("getExtractor"),
+        ]);
+        const r = pipeReport(pipes, { junctions: asArray(junctions), pumps: asArray(pumps), machines: [...asArray(factory), ...asArray(generators), ...asArray(extractors)] }, { bbox, limit });
+        return only_problems ? { pipesConsidered: r.pipesConsidered, phantom: r.phantom } : r;
       }),
   );
 

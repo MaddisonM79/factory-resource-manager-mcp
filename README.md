@@ -48,6 +48,7 @@ service-auth policy. Nothing on the game machine is exposed to the internet.
 | `logistics_status` | Trains with cargo, stations per platform, trucks, drones |
 | `site_status` | One row per site (spatial cluster, default 200 m): machines by state, MW, buildings, recipes |
 | `belt_load` | Belts by tier, dangling ends, belts too slow for the machine they feed or drain |
+| `pipe_load` | Pipes by tier, and every unconnected pipe end classified as phantom (touching a junction, pump, or machine but not joined) or open |
 | `station_throughput` | Per station and platform: mode, status, cargo, rates, trains scheduled / inbound / docked |
 | `sink_rates` | AWESOME Sink coupons, points/min, ETA to next coupon, sink buildings |
 | `depot_status` | Dimensional Depot per item: stock, capacity, full, fill rate, minutes to full, when it filled |
