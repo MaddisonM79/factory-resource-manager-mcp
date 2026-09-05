@@ -523,7 +523,7 @@ async function tabEmergency(main) {
     const state = s.isOn ? "on" : "off";
     const good = s.isOn === s.expectedOn;
     return el("div", { class: "swrow" }, el("span", { class: "swname", text: s.name }),
-      el("span", { class: "pill " + (good ? "ok" : "bad"), text: state }), el("span", { class: "muted small", text: `expected ${s.expectedOn ? "on" : "off"} · circuits ${s.primaryCircuit}/${s.secondaryCircuit}${s.isOn !== s.reportedOn ? ` · FRM flag says ${s.reportedOn ? "on" : "off"}` : ""}` }));
+      el("span", { class: "pill " + (good ? "ok" : "bad"), text: state }), el("span", { class: "muted small", text: `expected ${s.expectedOn ? "on" : "off"} · circuits ${s.primaryCircuit}/${s.secondaryCircuit}${!s.isOn && s.sidesJoined ? " · bypassed" : ""}` }));
   };
   for (const site of r.sites) {
     const res = site.reserve?.reserve ?? null;

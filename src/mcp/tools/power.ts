@@ -180,7 +180,7 @@ export function registerPower(server: McpServer, env: Env): void {
     {
       description:
         "Dark-restart readiness. Power switches named *-EMERGENCY-RESERVE gate a battery bank that must stay isolated (switch OFF) and full; " +
-        "*-TIE switches are the site's cut-off from the main grid (ON in normal operation). Switch state is on/off, derived from the circuit topology (both sides on one circuit = on) because FRM's IsOn flag can be stale; the flag is reported too. Reports each site's switches, the circuit and battery behind each reserve " +
+        "*-TIE switches are the site's cut-off from the main grid (ON in normal operation). Switch state is on/off (FRM's IsOn); an off switch whose two sides still share a power group is bypassed by another cable path and is noted as such. Reports each site's switches, the circuit and battery behind each reserve " +
         "(charge %, MWh, in/out MW, time to empty or full, fuse), every deviation from the normal state as a plain issue, the overall mode " +
         "(normal, dark-restart in progress, mixed, none) and whether the reserves are ready. Live from getSwitches + getPower; nothing is sampled.",
       inputSchema: z.object({

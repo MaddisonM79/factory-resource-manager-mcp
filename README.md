@@ -177,11 +177,11 @@ A dark restart turns the ties off and the reserves on. `emergency_reserve`
 and `/api/emergency` pair them by site and report every deviation: a reserve
 that is on, a bank below the threshold, a discharging or loaded reserve side,
 a tripped fuse, a tie that is off. A switch not built yet, or a side with no
-cable, is a note rather than an issue. Switch state is always on/off and
-comes from the circuit topology (both sides of the switch on one circuit ID
-means it conducts), because FRM's `IsOn` flag has been seen wrong for a switch
-that was on; the flag is reported alongside with a note when they disagree.
-"Open" is avoided because it means opposite things to different people.
+cable, is a note rather than an issue. Switch state is always on/off (FRM's
+`IsOn`); "open" is avoided because it means opposite things to different
+people. The circuit topology is a cross-check: an off switch whose two sides
+still resolve to one power group is bypassed by another cable path and does
+not isolate anything by itself, which is reported as a note.
 
 Sign-in is [Hanko](https://hanko.io): the login element stores its JWT in a
 first-party `hanko` cookie, the Worker verifies it against the project's JWKS

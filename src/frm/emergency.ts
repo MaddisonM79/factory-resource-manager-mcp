@@ -2,11 +2,11 @@
 // bank that must stay isolated and full: the switch is OFF in normal operation. *-TIE switches
 // are the site's cut-off from the main grid: ON in normal operation. A dark restart turns the
 // ties off and the reserves on, then brings the grid back up behind them.
-// Vocabulary is on/off throughout; "open" means different things to different people.
-// State comes from the circuit topology, not FRM's IsOn flag: a switch whose two sides share a
-// circuit ID is conducting, one whose sides differ is not. IsOn has been seen stale/wrong for a
-// switch that was on (both sides circuit 0, flag false). The flag is still reported, with a note
-// when it disagrees. Built from getSwitches + getPower, so it is live, not sampled.
+// Vocabulary is on/off throughout (FRM's IsOn, which tracks the real switch); "open" means
+// different things to different people. Each side of a switch is a circuit ID, and getPower
+// groups the circuits that are joined, so the topology is a cross-check: an OFF switch whose two
+// sides still resolve to one power group is being bypassed by another cable path and does not
+// isolate anything by itself. Built from getSwitches + getPower, so it is live, not sampled.
 
 import { asArray, num, loc } from "./client.ts";
 
@@ -39,10 +39,9 @@ export interface SwitchRow {
   name: string;
   site: string;
   role: Role;
-  /** effective state from the topology: both sides on one circuit */
   isOn: boolean;
-  /** FRM's IsOn flag, for reference */
-  reportedOn: boolean;
+  /** both sides resolve to the same power group: joined, by this switch (on) or by another path (off) */
+  sidesJoined: boolean;
   expectedOn: boolean;
   ok: boolean;
   issues: string[];
@@ -109,25 +108,24 @@ export function emergencyReport(switchesRaw: unknown, power: unknown, opts: { mi
   for (const s of asArray(switchesRaw)) {
     const name = String(s.SwitchTag ?? s.Name ?? "");
     const role = roleOf(name);
-    const reportedOn = !!s.IsOn;
+    const isOn = !!s.IsOn;
     const pc = num(s.Primary), sc = num(s.Secondary);
-    const isOn = pc >= 0 && pc === sc;
     if (!role) { otherSwitches.push({ id: String(s.ID), name, isOn, location: loc(s) }); continue; }
     const primary = byCircuit.get(pc) ?? null, secondary = byCircuit.get(sc) ?? null;
+    const sidesJoined = !!primary && !!secondary && primary.group === secondary.group;
     const issues: string[] = [];
     const notes: string[] = [];
     if (pc < 0 || sc < 0) notes.push(`nothing wired to the ${pc < 0 && sc < 0 ? "switch" : pc < 0 ? "primary side" : "secondary side"} yet`);
-    else if (isOn !== reportedOn) notes.push(`FRM reports the switch as ${reportedOn ? "on" : "off"} but ${isOn ? `both sides are circuit ${pc}, so it is conducting` : `its sides are circuits ${pc} and ${sc}, so nothing flows`}; going by the circuits`);
+    else if (!isOn && sidesJoined) notes.push(`switch is off but both sides are still power group ${primary!.group}: another cable path joins them, so this switch alone does not ${role === "tie" ? "cut the site off" : "isolate the bank"}`);
     let reserve: GroupView | null = null;
     if (role === "reserve") {
       if (isOn) issues.push("reserve switch is on: the bank is bridged to the grid instead of held back");
       const sides = [primary, secondary].filter((g): g is GroupView => !!g);
       const isolated = sides.filter((g) => !main || g.group !== main.group);
-      // Switch on: both sides are the same group, nothing is "behind" it. Off: the side that is not the grid,
+      // Sides joined (switch on, or bypassed): nothing is "behind" it. Otherwise the side that is not the grid,
       // preferring the one that actually has a battery, then the one with less generation.
       const score = (g: GroupView) => (g.batteryMWh > 0 ? 0 : 1e12) + g.capacityMW;
-      reserve = primary && secondary && primary.group === secondary.group ? null
-        : isolated.length ? isolated.reduce((a, b) => (score(b) < score(a) ? b : a)) : null;
+      reserve = sidesJoined ? null : isolated.length ? isolated.reduce((a, b) => (score(b) < score(a) ? b : a)) : null;
       if (!isOn && !reserve) issues.push("cannot see a circuit behind the switch (no power group for either side)");
       if (reserve) {
         if (reserve.batteryMWh <= 0) issues.push("no battery behind the switch");
@@ -146,7 +144,7 @@ export function emergencyReport(switchesRaw: unknown, power: unknown, opts: { mi
     // Normal operation: reserves off, ties on.
     const expectedOn = role === "tie";
     switches.push({
-      id: String(s.ID), name, site: siteOf(name), role, isOn, reportedOn, expectedOn, ok: issues.length === 0, issues, notes,
+      id: String(s.ID), name, site: siteOf(name), role, isOn, sidesJoined, expectedOn, ok: issues.length === 0, issues, notes,
       primaryCircuit: pc, secondaryCircuit: sc, primary, secondary, reserve, location: loc(s),
     });
   }
