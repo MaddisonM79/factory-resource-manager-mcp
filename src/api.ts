@@ -1,11 +1,13 @@
 // Read API for the history tables and the live KV ring. Mounted behind the OAuth
-// provider at /api/, so it takes the same bearer token as /mcp. Read-only except
-// renaming lookup rows; nothing here can reach the FRM tunnel.
+// provider at /api/ (same bearer token as /mcp) and behind the Hanko session check
+// on the dashboard host. Read-only except renaming lookup rows. Only /api/status
+// reaches the FRM tunnel, with two cheap calls, so the dashboard can say "running"
+// from a live answer rather than from sampler staleness.
 
 import { Hono } from "hono";
-import { type Env, readSamples } from "./frm.ts";
+import { type Env, readSamples, frmGet, asArray, loc } from "./frm.ts";
 import { RAW_RETENTION_SECONDS, pickRes, type Res } from "./history.ts";
-import { readSeries, readVisits, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "./store.ts";
+import { readSeries, readVisits, readLatest, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "./store.ts";
 
 export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
 
@@ -29,13 +31,55 @@ function range(c: any, now: number): { from: number; to: number; res: string | n
   return { from: Math.floor(from), to: Math.floor(to), res };
 }
 
-class BadRequest extends Error {}
+export class BadRequest extends Error {}
 
-api.onError((e, c) => {
+/** Shared by this app and the dashboard, which mounts these routes (a sub-app's onError is not inherited). */
+export function apiError(e: Error, c: any): Response {
   if (e instanceof BadRequest) return c.json({ error: e.message }, 400);
   if (e instanceof NotFound) return c.json({ error: e.message }, 404);
   console.error("api:", e);
   return c.json({ error: e.message ?? String(e) }, 500);
+}
+
+api.onError(apiError);
+
+/** Live "is the game up" for the dashboard header: FRM answered just now, or why not. */
+api.get("/api/status", async (c) => {
+  const now = Date.now();
+  const ringP = readSamples(c.env).catch(() => []);
+  let session: any = null, players: any[] = [], error: string | null = null;
+  try {
+    const [s, p] = await Promise.all([frmGet(c.env, "getSessionInfo"), frmGet(c.env, "getPlayer").catch(() => [])]);
+    session = s;
+    players = asArray(p).map((x) => ({ name: x.PlayerName ?? x.Name, online: x.Online, location: loc(x), health: x.PlayerHP }));
+  } catch (e: any) {
+    error = String(e?.message ?? e);
+  }
+  const ring = await ringP;
+  const latest = ring[ring.length - 1] ?? null;
+  return c.json({
+    now: Math.floor(now / 1000),
+    reachable: error == null,
+    error,
+    session: session && {
+      name: session.SessionName, paused: !!session.IsPaused, is_day: !!session.IsDay,
+      play_seconds: session.TotalPlayDuration, play_text: session.TotalPlayDurationText, days: session.PassedDays,
+      hours: session.Hours, minutes: session.Minutes,
+    },
+    players,
+    sampler: {
+      latest_ts: latest ? Math.floor(latest.t / 1000) : null,
+      staleness_seconds: latest ? Math.floor((now - latest.t) / 1000) : null,
+      gap: latest?.gap ?? null,
+    },
+  });
+});
+
+/** Newest good tick from every history table, for tables and pickers. */
+api.get("/api/latest", async (c) => {
+  const latest = await readLatest(c.env.DB);
+  const now = Math.floor(Date.now() / 1000);
+  return c.json({ ...latest, now, staleness_seconds: latest.ts == null ? null : now - latest.ts });
 });
 
 api.get("/api/live", async (c) => {

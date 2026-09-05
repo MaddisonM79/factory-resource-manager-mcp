@@ -218,6 +218,88 @@ export function toSeries(rows: Row[], gapRows: { ts: number; epoch: number }[], 
 
 export class NotFound extends Error {}
 
+/** Columns that identify one series inside a kind; thinning and charting group by these. */
+export const SERIES_KEY_COLS: Record<SeriesKind, string[]> = {
+  power: ["circuit_group"],
+  site: ["site_id"],
+  gens: ["fuel_type", "field_id"],
+  depot: ["item"],
+  prod: ["item"],
+  station: ["station", "platform"],
+  sinks: ["sink"],
+};
+
+export const seriesKeyOf = (kind: SeriesKind, r: Row): string => SERIES_KEY_COLS[kind].map((c) => String(r[c] ?? "")).join("|");
+
+/**
+ * Thin to at most `max` points per series key, evenly, keeping the first point of each key.
+ * Thinning the flat row list would drop whole keys (a 20-point pull of 3 circuit groups kept 2), so group first.
+ */
+export function thinSeries(kind: SeriesKind, s: Series, max: number): Series & { thinned_from?: number } {
+  const groups = new Map<string, Row[]>();
+  for (const p of s.points) { const k = seriesKeyOf(kind, p); groups.set(k, [...(groups.get(k) ?? []), p]); }
+  if (![...groups.values()].some((g) => g.length > max)) return s;
+  const kept: Row[] = [];
+  for (const g of groups.values()) {
+    if (g.length <= max) { kept.push(...g); continue; }
+    const step = g.length / max;
+    for (let i = 0; i < max; i++) kept.push(g[Math.floor(i * step)]);
+  }
+  kept.sort((a, b) => Number(a.ts) - Number(b.ts));
+  return { ...s, thinned_from: s.points.length, points: kept };
+}
+
+export interface Latest {
+  /** ts of the newest good tick, or null when the tables are empty */
+  ts: number | null;
+  epoch: number | null;
+  session: string | null;
+  playtime: number | null;
+  /** newest gap row, if it is newer than the newest good tick */
+  gap: { ts: number; reason: string } | null;
+  power: Row[];
+  sites: Row[];
+  gens: Row[];
+  depot: Row[];
+  prod: Row[];
+  stations: Row[];
+  sinks: Row[];
+}
+
+/** Every table's rows for the newest good tick, with sites and generator fields resolved to lookup names. */
+export async function readLatest(db: D1Database): Promise<Latest> {
+  const head = await db.prepare("SELECT ts, epoch, session, playtime FROM power_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; epoch: number; session: string; playtime: number }>();
+  const gapRow = await db.prepare("SELECT ts, reason FROM gap_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; reason: string }>();
+  const gap = gapRow && (!head || gapRow.ts > head.ts) ? gapRow : null;
+  if (!head) return { ts: null, epoch: null, session: null, playtime: null, gap, power: [], sites: [], gens: [], depot: [], prod: [], stations: [], sinks: [] };
+  const ts = head.ts;
+  const at = (sql: string) => all(db, sql, ts);
+  const [siteLookup, fieldLookup, power, sites, gens, depot, prod, stations, sinks] = await Promise.all([
+    listLookup(db, "sites"), listLookup(db, "fields"),
+    at("SELECT circuit_group, capacity_mw, production_mw, consumed_mw, max_consumed_mw, battery_pct, battery_in_mw, battery_out_mw, fuse_tripped FROM power_samples WHERE ts = ? ORDER BY circuit_group"),
+    at("SELECT site_id, center_x, center_y, center_z, machines, running, blocked, starved, unpowered, paused, unconfigured, idle, mw_draw, mw_max, avg_productivity FROM site_samples WHERE ts = ? ORDER BY machines DESC"),
+    at("SELECT fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw FROM gen_samples WHERE ts = ? ORDER BY fuel_type, field_id"),
+    at("SELECT item, stock, capacity, is_full FROM depot_samples WHERE ts = ? ORDER BY item"),
+    at("SELECT item, produced_per_min, consumed_per_min, max_prod, max_cons FROM prod_samples WHERE ts = ? ORDER BY item"),
+    at("SELECT station, platform, mode, cargo, transfer_rate, docked_train, inbound FROM station_samples WHERE ts = ? ORDER BY station, platform"),
+    at("SELECT sink, coupons, points_to_next, points_per_min FROM sink_samples WHERE ts = ? ORDER BY sink"),
+  ]);
+  const nameOf = (lookup: Lookup[], id: unknown) => lookup.find((l) => l.id === Number(id))?.name ?? null;
+  return {
+    ts, epoch: head.epoch, session: head.session, playtime: head.playtime, gap,
+    power,
+    sites: sites.map((r) => {
+      const site_id = r.site_id ?? resolveCenter({ x: Number(r.center_x), y: Number(r.center_y) }, siteLookup);
+      return { ...r, site_id, name: nameOf(siteLookup, site_id) };
+    }),
+    gens: gens.map((r) => {
+      const field_id = r.field_id == null ? resolveCenter({ x: Number(r.center_x), y: Number(r.center_y) }, fieldLookup) : Number(r.field_id);
+      return { ...r, field_id, name: field_id === 0 ? "map-wide" : nameOf(fieldLookup, field_id) };
+    }),
+    depot, prod, stations, sinks,
+  };
+}
+
 export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series[]> {
   const { from, to, res } = q;
   const gapsP = all<{ ts: number; epoch: number }>(db, "SELECT ts, epoch FROM gap_samples WHERE ts BETWEEN ? AND ? ORDER BY ts", from, to);

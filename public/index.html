@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FRM Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23eb6834'/%3E%3Cpath d='M3 12 L6 7 L9 10 L13 4' stroke='white' stroke-width='2' fill='none'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/vendor/uPlot.min.css">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="top">
+<div class="toprow">
+  <div class="brand">
+    <span class="dot" id="status-dot" aria-hidden="true"></span>
+    <div>
+      <div class="title"><span id="status-word">Checking</span><span class="session" id="session-name"></span></div>
+      <div class="sub" id="status-sub">connecting…</div>
+    </div>
+  </div>
+  <div class="controls">
+    <div class="seg" role="group" aria-label="Time range" id="range"></div>
+    <div class="seg" role="group" aria-label="Time zone" id="tz">
+      <button data-tz="local" type="button">Local</button>
+      <button data-tz="utc" type="button">UTC</button>
+    </div>
+    <button type="button" id="refresh" title="Refresh">Refresh</button>
+    <button type="button" id="logout" class="ghost" hidden>Sign out</button>
+  </div>
+</div>
+<nav class="tabs" id="tabs" role="tablist"></nav>
+</header>
+
+<main id="main">
+  <section class="empty" id="loading"><p>Loading…</p></section>
+</main>
+
+<div class="overlay" id="login" hidden>
+  <div class="card login-card">
+    <h1>FRM Dashboard</h1>
+    <p class="muted">Sign in to see the factory.</p>
+    <div id="hanko-mount"></div>
+    <p class="muted small" id="login-error" hidden></p>
+  </div>
+</div>
+
+<script src="/vendor/uPlot.iife.min.js"></script>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

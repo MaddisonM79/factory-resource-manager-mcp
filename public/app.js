@@ -1,0 +1,573 @@
+// FRM dashboard. Plain ES module, no build step. Data comes from /api/* on this host
+// (Hanko session cookie), charts are uPlot (global from /vendor/uPlot.iife.min.js).
+
+import { register } from "/vendor/hanko-elements.js";
+
+// ---------------------------------------------------------------- state
+
+const RANGES = [["1h", 3600], ["6h", 6 * 3600], ["24h", 24 * 3600], ["7d", 7 * 86400], ["30d", 30 * 86400]];
+const TABS = [["overview", "Overview"], ["power", "Power"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
+const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
+const STATES = ["running", "blocked", "starved", "unpowered", "paused", "unconfigured", "idle"];
+
+const stored = (k, d) => { try { return localStorage.getItem("frm." + k) ?? d; } catch { return d; } };
+const store = (k, v) => { try { localStorage.setItem("frm." + k, v); } catch {} };
+
+const state = {
+  range: stored("range", "24h"),
+  tz: stored("tz", "local"),
+  tab: stored("tab", "overview"),
+  status: null,
+  latest: null,
+  hanko: null,
+  charts: [],          // live uPlot instances on the current tab, destroyed on re-render
+  sel: {},             // per-tab selections (circuit group, item, site, ...)
+};
+
+const $ = (s, r = document) => r.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v == null) continue;
+    if (k === "class") n.className = v;
+    else if (k === "text") n.textContent = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else if (k === "hidden") n.hidden = !!v;
+    else n.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) n.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  return n;
+};
+const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------------------------------------------------------------- formatting
+
+const tzName = () => (state.tz === "utc" ? "UTC" : Intl.DateTimeFormat().resolvedOptions().timeZone);
+const fmtTime = (ts, opts = {}) => new Intl.DateTimeFormat(undefined, { timeZone: tzName(), month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", ...opts }).format(new Date(ts * 1000));
+const fmtNum = (v, d = 0) => (v == null || Number.isNaN(v) ? "–" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: 0 }));
+const fmtMW = (v) => (v == null ? "–" : Math.abs(v) >= 1000 ? fmtNum(v / 1000, 2) + " GW" : fmtNum(v, 1) + " MW");
+const fmtPct = (v) => (v == null ? "–" : fmtNum(v, 1) + "%");
+function fmtAge(s) {
+  if (s == null) return "never";
+  if (s < 90) return `${Math.round(s)}s ago`;
+  if (s < 5400) return `${Math.round(s / 60)} min ago`;
+  if (s < 172800) return `${(s / 3600).toFixed(1)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+}
+const fmtDur = (s) => { s = Math.round(s || 0); const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60); return `${h}:${String(m).padStart(2, "0")}`; };
+
+// ---------------------------------------------------------------- api
+
+class LoginRequired extends Error {}
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, { credentials: "same-origin", ...opts });
+  if (r.status === 401) throw new LoginRequired();
+  const body = await r.json().catch(() => ({ error: `${r.status} ${r.statusText}` }));
+  if (!r.ok) throw new Error(body.error ?? `${r.status}`);
+  return body;
+}
+
+const window_ = () => { const to = Math.floor(Date.now() / 1000); const sec = RANGES.find((r) => r[0] === state.range)?.[1] ?? 86400; return { from: to - sec, to }; };
+const seriesUrl = (path, extra = {}) => {
+  const { from, to } = window_();
+  const q = new URLSearchParams({ from, to, ...extra });
+  return `${path}?${q}`;
+};
+
+// ---------------------------------------------------------------- series shaping
+
+/** /api/series/* returns one Series or an array of them (one per epoch). Always an array, oldest first. */
+const asSeriesList = (resp) => (Array.isArray(resp) ? resp : resp?.points ? [resp] : []).filter((s) => s.points?.length);
+
+/**
+ * Pivot Series[] into uPlot columns: xs plus one aligned column per (key, col).
+ * Gaps and epoch boundaries become null rows so lines break there.
+ */
+function pivot(list, keyOf, cols) {
+  const xs = new Set();
+  const gaps = [];
+  const epochs = [];
+  for (const s of list) {
+    for (const p of s.points) xs.add(Number(p.ts));
+    for (const g of s.gaps ?? []) { gaps.push([Number(g.from), Number(g.to)]); xs.add(Number(g.from)); xs.add(Number(g.to)); }
+  }
+  for (let i = 1; i < list.length; i++) {
+    const first = Math.min(...list[i].points.map((p) => Number(p.ts)));
+    epochs.push({ ts: first, session: list[i].session, epoch: list[i].epoch });
+    xs.add(first - 1);
+  }
+  const x = [...xs].sort((a, b) => a - b);
+  const idx = new Map(x.map((v, i) => [v, i]));
+  const keys = new Map(); // key -> { [col]: number[] }
+  for (const s of list) for (const p of s.points) {
+    const k = keyOf(p);
+    let row = keys.get(k);
+    if (!row) { row = {}; for (const c of cols) row[c] = new Array(x.length).fill(null); keys.set(k, row); }
+    const i = idx.get(Number(p.ts));
+    for (const c of cols) { const v = p[c]; row[c][i] = v == null ? null : Number(v); }
+  }
+  // Points inside a gap are impossible, but a sample at exactly the gap edge exists; null the interior.
+  for (const [a, b] of gaps) for (let i = 0; i < x.length; i++) if (x[i] >= a && x[i] <= b) for (const row of keys.values()) for (const c of cols) row[c][i] = null;
+  return { x, keys, gaps, epochs, res: list[0]?.res ?? "raw", thinned: list.some((s) => s.thinned_from) };
+}
+
+// ---------------------------------------------------------------- charts
+
+/** Shaded gap bands + dashed epoch lines with the session name. */
+function annotationsPlugin(get) {
+  return {
+    hooks: {
+      draw: (u) => {
+        const { ctx, bbox } = u;
+        const { gaps, epochs } = get();
+        ctx.save();
+        ctx.fillStyle = cssVar("--gap");
+        for (const [a, b] of gaps) {
+          const x0 = Math.max(u.valToPos(a, "x", true), bbox.left);
+          const x1 = Math.min(u.valToPos(b, "x", true), bbox.left + bbox.width);
+          if (x1 > bbox.left && x0 < bbox.left + bbox.width) ctx.fillRect(x0, bbox.top, Math.max(2, x1 - x0), bbox.height);
+        }
+        ctx.strokeStyle = cssVar("--muted");
+        ctx.fillStyle = cssVar("--muted");
+        ctx.setLineDash([4, 4]);
+        ctx.lineWidth = 1;
+        ctx.font = "11px system-ui, sans-serif";
+        for (const e of epochs) {
+          const px = u.valToPos(e.ts, "x", true);
+          if (px < bbox.left || px > bbox.left + bbox.width) continue;
+          ctx.beginPath(); ctx.moveTo(px, bbox.top); ctx.lineTo(px, bbox.top + bbox.height); ctx.stroke();
+          ctx.fillText(`epoch ${e.epoch}${e.session ? " · " + e.session : ""}`, px + 4, bbox.top + 12);
+        }
+        ctx.restore();
+      },
+    },
+  };
+}
+
+/**
+ * One line chart. series: [{ label, data, color?, dash? }], unit: axis suffix.
+ * Colors are palette slots in fixed order; more than 8 series is a design smell, so we stop there.
+ */
+function lineChart(host, { x, series, unit = "", gaps = [], epochs = [], min = null, max = null, height = 240, fmt = (v) => fmtNum(v, 1) }) {
+  host.replaceChildren();
+  if (!x.length || !series.length) { host.append(el("div", { class: "chart-empty", text: "No samples in this range yet." })); return null; }
+  const shown = series.slice(0, 8);
+  const tz = tzName();
+  const opts = {
+    width: host.clientWidth || 600,
+    height,
+    tzDate: (ts) => uPlot.tzDate(new Date(ts * 1e3), tz),
+    cursor: { x: true, y: false, drag: { x: true, y: false } },
+    legend: { live: true },
+    plugins: [annotationsPlugin(() => ({ gaps, epochs }))],
+    scales: { x: { time: true }, y: { range: (u, lo, hi) => [min ?? Math.min(0, lo), max ?? (hi === lo ? hi + 1 : hi * 1.05)] } },
+    axes: [
+      { stroke: cssVar("--muted"), grid: { stroke: cssVar("--grid"), width: 1 }, ticks: { stroke: cssVar("--axis"), width: 1 } },
+      { stroke: cssVar("--muted"), grid: { stroke: cssVar("--grid"), width: 1 }, ticks: { show: false }, values: (u, vals) => vals.map((v) => fmt(v) + unit),
+        // Width from the widest label, so "40,000 MW" is never clipped.
+        size: (u, values) => 14 + 7 * Math.max(3, ...(values ?? []).map((v) => String(v).length)) },
+    ],
+    series: [
+      { value: (u, v) => (v == null ? "" : fmtTime(v, { second: "2-digit" })) },
+      ...shown.map((s, i) => ({
+        label: s.label, stroke: s.color ?? cssVar(SLOTS[i]), width: 2, dash: s.dash, spanGaps: false,
+        points: { show: false },
+        value: (u, v) => (v == null ? "–" : fmt(v) + unit),
+      })),
+    ],
+  };
+  const u = new uPlot(opts, [x, ...shown.map((s) => s.data)], host);
+  const ro = new ResizeObserver(() => u.setSize({ width: host.clientWidth, height }));
+  ro.observe(host);
+  state.charts.push({ u, ro });
+  return u;
+}
+
+function chartCard(title, hint) {
+  const host = el("div", { class: "chart" });
+  const card = el("div", { class: "card" }, el("h2", {}, title, hint ? el("span", { class: "hint", text: hint }) : null), host);
+  return { card, host };
+}
+const resNote = (pv) => (pv.res === "hourly" ? "hourly averages" : "5-minute samples") + (pv.thinned ? ", thinned" : "") + (pv.gaps.length ? `, ${pv.gaps.length} outage${pv.gaps.length > 1 ? "s" : ""} shaded` : "");
+
+function destroyCharts() { for (const c of state.charts) { c.ro.disconnect(); c.u.destroy(); } state.charts = []; }
+
+// ---------------------------------------------------------------- tables
+
+/** Sortable table. cols: [{ key, label, num?, render?(row) -> node|string, sort?(row) -> comparable }]. */
+function table(rows, cols, { onRow, selected, initialSort } = {}) {
+  let sortKey = initialSort?.key ?? cols[0].key, dir = initialSort?.dir ?? 1;
+  const wrap = el("div", { class: "tablewrap" });
+  const render = () => {
+    const c = cols.find((x) => x.key === sortKey);
+    const val = c?.sort ?? ((r) => r[sortKey]);
+    const sorted = [...rows].sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * dir; });
+    const t = el("table", {},
+      el("thead", {}, el("tr", {}, cols.map((col) => el("th", { class: col.num ? "num" : null, onclick: () => { if (sortKey === col.key) dir = -dir; else { sortKey = col.key; dir = col.num ? -1 : 1; } render(); } }, col.label + (sortKey === col.key ? (dir > 0 ? " ▲" : " ▼") : ""))))),
+      el("tbody", {}, sorted.map((r) => el("tr", { class: selected && selected(r) ? "sel" : null, onclick: onRow ? () => onRow(r) : null },
+        cols.map((col) => { const v = col.render ? col.render(r) : r[col.key]; return el("td", { class: [col.num ? "num" : "", col.key === "name" || col.key === "item" ? "name" : ""].join(" ").trim() || null, title: typeof v === "string" && v.length > 24 ? v : null }, v ?? "–"); })))),
+    );
+    wrap.replaceChildren(t);
+  };
+  render();
+  return wrap;
+}
+
+const signed = (v, d = 1) => el("span", { class: v < 0 ? "neg" : v > 0 ? "pos" : null, text: (v > 0 ? "+" : "") + fmtNum(v, d) });
+
+// ---------------------------------------------------------------- header / status
+
+function renderStatus() {
+  const s = state.status;
+  const dot = $("#status-dot"), word = $("#status-word"), sub = $("#status-sub"), name = $("#session-name");
+  dot.className = "dot";
+  if (!s) { word.textContent = "Checking"; sub.textContent = "…"; return; }
+  const samp = s.sampler ?? {};
+  const age = samp.staleness_seconds;
+  if (!s.reachable) {
+    dot.classList.add("down"); word.textContent = "Unreachable"; name.textContent = "";
+    sub.textContent = `${s.error ?? "FRM did not answer"} · last sample ${fmtAge(age)}${samp.gap ? " (gap)" : ""}`;
+    return;
+  }
+  const sess = s.session ?? {};
+  dot.classList.add(sess.paused ? "paused" : "running");
+  word.textContent = sess.paused ? "Paused" : "Running";
+  name.textContent = sess.name ?? "";
+  const online = (s.players ?? []).filter((p) => p.online).map((p) => p.name);
+  sub.textContent = [
+    online.length ? `${online.length} online: ${online.join(", ")}` : "nobody online",
+    sess.play_text ? `play ${sess.play_text}` : null,
+    sess.days != null ? `day ${sess.days} ${sess.is_day ? "☀" : "☾"} ${String(sess.hours ?? 0).padStart(2, "0")}:${String(sess.minutes ?? 0).padStart(2, "0")}` : null,
+    `sampler ${fmtAge(age)}${samp.gap ? " (gap)" : ""}`,
+  ].filter(Boolean).join(" · ");
+}
+
+function renderControls() {
+  const range = $("#range");
+  range.replaceChildren(...RANGES.map(([k]) => el("button", { type: "button", "aria-pressed": String(state.range === k), onclick: () => { state.range = k; store("range", k); renderTab(); } }, k)));
+  for (const b of $("#tz").querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.tz === state.tz));
+  $("#tabs").replaceChildren(...TABS.map(([k, label]) => el("button", { type: "button", role: "tab", "aria-selected": String(state.tab === k), onclick: () => { state.tab = k; store("tab", k); renderControls(); renderTab(); } }, label)));
+}
+
+// ---------------------------------------------------------------- tabs
+
+const latestPower = () => state.latest?.power ?? [];
+const groupLabel = (g) => `Circuit group ${g}`;
+const busiestGroup = () => latestPower().reduce((best, r) => (best == null || Number(r.consumed_mw) > Number(best.consumed_mw) ? r : best), null)?.circuit_group;
+
+async function tabOverview(main) {
+  const L = state.latest ?? {}, S = state.status ?? {};
+  const power = L.power ?? [], sites = L.sites ?? [], prod = L.prod ?? [], sinks = L.sinks ?? [];
+  const sum = (rows, k) => rows.reduce((a, r) => a + Number(r[k] ?? 0), 0);
+  const cap = sum(power, "capacity_mw"), cons = sum(power, "consumed_mw"), maxc = sum(power, "max_consumed_mw");
+  const batt = power.filter((r) => r.battery_pct != null).map((r) => Number(r.battery_pct));
+  const machines = sum(sites, "machines"), running = sum(sites, "running");
+  const deficits = prod.filter((r) => Number(r.consumed_per_min) > Number(r.produced_per_min) + 1e-6).length;
+  const rs = sinks.find((r) => r.sink === "resource");
+  const tile = (k, v, unit, d, cls) => el("div", { class: "tile" }, el("div", { class: "k", text: k }), el("div", { class: "v" }, v, unit ? el("small", { text: unit }) : null), d ? el("div", { class: "d " + (cls ?? ""), text: d }) : null);
+  main.append(el("div", { class: "tiles" },
+    tile("Game", S.reachable ? (S.session?.paused ? "Paused" : "Running") : "Down", "", S.reachable ? `${(S.players ?? []).filter((p) => p.online).length} online` : S.error?.slice(0, 60), S.reachable ? "ok" : "bad"),
+    tile("Grid draw", fmtMW(cons), "", `of ${fmtMW(cap)} capacity · peak ${fmtMW(maxc)}`, maxc > cap ? "bad" : null),
+    tile("Headroom", fmtMW(cap - cons), "", cap ? `${fmtPct(100 * (cap - cons) / cap)} free` : "no capacity", cap - maxc < 0 ? "bad" : null),
+    tile("Battery", batt.length ? fmtPct(Math.min(...batt)) : "none", "", batt.length ? `${batt.length} circuit${batt.length > 1 ? "s" : ""} with storage` : ""),
+    tile("Machines running", fmtNum(running), `/ ${fmtNum(machines)}`, machines ? `${fmtPct(100 * running / machines)} across ${sites.length} sites` : ""),
+    tile("Item deficits", fmtNum(deficits), "", deficits ? "consuming more than producing" : "everything in balance", deficits ? "bad" : "ok"),
+    tile("Coupons", rs ? fmtNum(rs.coupons) : "–", "", rs ? `${fmtNum(rs.points_per_min)} pts/min · ${fmtNum(rs.points_to_next)} to next` : "no sink samples"),
+    tile("History", L.ts ? fmtTime(L.ts) : "–", "", L.ts ? `epoch ${L.epoch} · sampled ${fmtAge(L.staleness_seconds)}` : "no ticks yet", L.gap ? "bad" : null),
+  ));
+  const g = busiestGroup();
+  const grid = el("div", { class: "grid" });
+  main.append(grid);
+  if (g != null) {
+    const { card, host } = chartCard(`${groupLabel(g)} · MW`, "busiest circuit");
+    grid.append(card);
+    const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/power", { group: g }))), () => "g", ["capacity_mw", "production_mw", "consumed_mw", "max_consumed_mw"]);
+    const row = pv.keys.get("g");
+    lineChart(host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: " MW", fmt: (v) => fmtNum(v, 0), series: row ? [
+      { label: "Capacity", data: row.capacity_mw, color: cssVar("--s1") },
+      { label: "Production", data: row.production_mw, color: cssVar("--s3") },
+      { label: "Consumption", data: row.consumed_mw, color: cssVar("--s2") },
+      { label: "Peak draw", data: row.max_consumed_mw, color: cssVar("--s4"), dash: [4, 4] },
+    ] : [] });
+    card.append(el("div", { class: "chart-note", text: resNote(pv) }));
+  }
+  grid.append(sitesCard(sites, true));
+}
+
+function stateBar(r) {
+  const total = Number(r.machines) || 1;
+  return el("div", { class: "bar" }, STATES.map((s) => { const n = Number(r[s] ?? 0); return n > 0 ? el("span", { class: "st-" + s, style: `width:${100 * n / total}%`, title: `${s}: ${n}` }) : null; }));
+}
+const stateLegend = () => el("div", { class: "legend" }, STATES.map((s) => el("span", {}, el("i", { class: "st-" + s }), s)));
+
+function sitesCard(sites, compact) {
+  const cols = [
+    { key: "name", label: "Site", render: (r) => r.name ?? `unresolved (${fmtNum(r.center_x / 100)}, ${fmtNum(r.center_y / 100)})` },
+    { key: "machines", label: "Machines", num: true },
+    { key: "bar", label: "States", render: stateBar, sort: (r) => Number(r.running) / (Number(r.machines) || 1) },
+    ...(compact ? [] : STATES.map((s) => ({ key: s, label: s, num: true }))),
+    { key: "mw_draw", label: "MW", num: true, render: (r) => fmtNum(r.mw_draw, 0) },
+    { key: "avg_productivity", label: "Prod. %", num: true, render: (r) => fmtPct(r.avg_productivity) },
+  ];
+  const card = el("div", { class: "card" }, el("h2", {}, "Sites", el("span", { class: "hint", text: "machines by state, newest tick" })), stateLegend());
+  card.append(sites.length ? table(sites, cols, { initialSort: { key: "machines", dir: -1 }, onRow: compact ? (r) => { state.tab = "sites"; state.sel.site = r.site_id; store("tab", "sites"); renderControls(); renderTab(); } : null }) : el("div", { class: "chart-empty", text: "No site samples yet." }));
+  return card;
+}
+
+async function tabPower(main) {
+  const power = latestPower();
+  if (!power.length) { main.append(el("div", { class: "empty", text: "No power samples yet." })); return; }
+  if (state.sel.group == null || !power.some((r) => r.circuit_group === state.sel.group)) state.sel.group = busiestGroup();
+  const bar = el("div", { class: "toolbar" }, el("span", { class: "muted", text: "Circuit group" }),
+    el("div", { class: "seg" }, power.map((r) => el("button", { type: "button", "aria-pressed": String(r.circuit_group === state.sel.group), onclick: () => { state.sel.group = r.circuit_group; renderTab(); } }, `${r.circuit_group}`, r.fuse_tripped ? " ⚡" : ""))));
+  main.append(bar);
+  const now = power.find((r) => r.circuit_group === state.sel.group);
+  main.append(el("div", { class: "tiles" },
+    el("div", { class: "tile" }, el("div", { class: "k", text: "Capacity" }), el("div", { class: "v", text: fmtMW(now.capacity_mw) })),
+    el("div", { class: "tile" }, el("div", { class: "k", text: "Consumption" }), el("div", { class: "v", text: fmtMW(now.consumed_mw) }), el("div", { class: "d", text: `peak ${fmtMW(now.max_consumed_mw)}` })),
+    el("div", { class: "tile" }, el("div", { class: "k", text: "Production" }), el("div", { class: "v", text: fmtMW(now.production_mw) })),
+    el("div", { class: "tile" }, el("div", { class: "k", text: "Battery" }), el("div", { class: "v", text: now.battery_pct == null ? "none" : fmtPct(now.battery_pct) }), now.battery_pct != null ? el("div", { class: "d", text: `in ${fmtMW(now.battery_in_mw)} · out ${fmtMW(now.battery_out_mw)}` }) : null),
+    el("div", { class: "tile" }, el("div", { class: "k", text: "Fuse" }), el("div", { class: "v " + (Number(now.fuse_tripped) ? "neg" : ""), text: Number(now.fuse_tripped) ? "Tripped" : "OK" })),
+  ));
+  const grid = el("div", { class: "grid wide" });
+  main.append(grid);
+  const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/power", { group: state.sel.group }))), () => "g", ["capacity_mw", "production_mw", "consumed_mw", "max_consumed_mw", "battery_pct", "battery_in_mw", "battery_out_mw"]);
+  const row = pv.keys.get("g");
+  const a = chartCard(`${groupLabel(state.sel.group)} · MW`); grid.append(a.card);
+  lineChart(a.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: " MW", fmt: (v) => fmtNum(v, 0), series: row ? [
+    { label: "Capacity", data: row.capacity_mw, color: cssVar("--s1") },
+    { label: "Production", data: row.production_mw, color: cssVar("--s3") },
+    { label: "Consumption", data: row.consumed_mw, color: cssVar("--s2") },
+    { label: "Peak draw", data: row.max_consumed_mw, color: cssVar("--s4"), dash: [4, 4] },
+  ] : [] });
+  a.card.append(el("div", { class: "chart-note", text: resNote(pv) }));
+  if (row && row.battery_pct.some((v) => v != null)) {
+    const b = chartCard("Battery charge", "%"); grid.append(b.card);
+    lineChart(b.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "%", min: 0, max: 100, height: 180, series: [{ label: "Charge", data: row.battery_pct, color: cssVar("--s1") }] });
+    const c = chartCard("Battery flow", "MW in and out"); grid.append(c.card);
+    lineChart(c.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: " MW", height: 180, fmt: (v) => fmtNum(v, 0), series: [
+      { label: "Charging", data: row.battery_in_mw, color: cssVar("--s3") },
+      { label: "Discharging", data: row.battery_out_mw, color: cssVar("--s2") },
+    ] });
+  }
+}
+
+/** Table on the left, chart of the selected row on the right. Shared by production and depot. */
+async function pickerTab(main, { rows, cols, initialSort, selKey, idOf, label, searchKeys, seriesPath, cols2, seriesOf, unit, fmt, empty }) {
+  if (!rows.length) { main.append(el("div", { class: "empty", text: empty })); return; }
+  if (state.sel[selKey] == null || !rows.some((r) => idOf(r) === state.sel[selKey])) state.sel[selKey] = idOf([...rows].sort(initialSort.cmp)[0]);
+  const search = el("input", { type: "search", placeholder: "filter…", value: state.sel[selKey + "_q"] ?? "" });
+  const grid = el("div", { class: "grid" });
+  const left = el("div", { class: "card" }, el("h2", {}, label, el("span", { class: "hint", text: "newest tick · click a row to chart it" })), el("div", { class: "toolbar" }, search));
+  const right = el("div", { class: "card" });
+  const host = el("div", { class: "chart" });
+  const note = el("div", { class: "chart-note" });
+  const rightTitle = el("h2");
+  right.append(rightTitle, host, note);
+  grid.append(left, right);
+  main.append(grid);
+  let tableEl = null;
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    state.sel[selKey + "_q"] = search.value;
+    const shown = q ? rows.filter((r) => searchKeys.some((k) => String(r[k] ?? "").toLowerCase().includes(q))) : rows;
+    const t = table(shown, cols, { initialSort: { key: initialSort.key, dir: initialSort.dir }, selected: (r) => idOf(r) === state.sel[selKey], onRow: (r) => { state.sel[selKey] = idOf(r); draw(); chart(); } });
+    if (tableEl) tableEl.replaceWith(t); else left.append(t);
+    tableEl = t;
+  };
+  const chart = async () => {
+    const id = state.sel[selKey];
+    rightTitle.replaceChildren(String(id));
+    right.classList.add("faded");
+    try {
+      const pv = pivot(asSeriesList(await api(seriesUrl(seriesPath(id)))), () => "k", cols2);
+      const row = pv.keys.get("k");
+      lineChart(host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit, fmt, series: row ? seriesOf(row, rows.find((r) => idOf(r) === id)) : [] });
+      note.textContent = resNote(pv);
+    } catch (e) { if (e instanceof LoginRequired) throw e; host.replaceChildren(el("div", { class: "chart-empty error", text: String(e.message) })); }
+    right.classList.remove("faded");
+  };
+  search.addEventListener("input", draw);
+  draw();
+  await chart();
+}
+
+const tabProduction = (main) => pickerTab(main, {
+  rows: state.latest?.prod ?? [], empty: "No production samples yet.",
+  selKey: "item", idOf: (r) => r.item, label: "Items", searchKeys: ["item"],
+  initialSort: { key: "balance", dir: 1, cmp: (a, b) => (a.produced_per_min - a.consumed_per_min) - (b.produced_per_min - b.consumed_per_min) },
+  cols: [
+    { key: "item", label: "Item" },
+    { key: "produced_per_min", label: "Produced /min", num: true, render: (r) => fmtNum(r.produced_per_min, 1) },
+    { key: "consumed_per_min", label: "Consumed /min", num: true, render: (r) => fmtNum(r.consumed_per_min, 1) },
+    { key: "balance", label: "Balance", num: true, sort: (r) => r.produced_per_min - r.consumed_per_min, render: (r) => signed(r.produced_per_min - r.consumed_per_min) },
+    { key: "max_prod", label: "Max prod", num: true, render: (r) => fmtNum(r.max_prod, 1) },
+  ],
+  seriesPath: (item) => `/api/series/prod/${encodeURIComponent(item)}`, cols2: ["produced_per_min", "consumed_per_min", "max_prod"], unit: "/min", fmt: (v) => fmtNum(v, 1),
+  seriesOf: (row) => [
+    { label: "Produced", data: row.produced_per_min, color: cssVar("--s3") },
+    { label: "Consumed", data: row.consumed_per_min, color: cssVar("--s2") },
+    { label: "Max production", data: row.max_prod, color: cssVar("--s1"), dash: [4, 4] },
+  ],
+});
+
+const tabDepot = (main) => pickerTab(main, {
+  rows: state.latest?.depot ?? [], empty: "No depot samples yet.",
+  selKey: "depot", idOf: (r) => r.item, label: "Dimensional Depot", searchKeys: ["item"],
+  initialSort: { key: "fill", dir: -1, cmp: (a, b) => (b.stock / (b.capacity || 1)) - (a.stock / (a.capacity || 1)) },
+  cols: [
+    { key: "item", label: "Item" },
+    { key: "stock", label: "Stock", num: true, render: (r) => fmtNum(r.stock) },
+    { key: "capacity", label: "Capacity", num: true, render: (r) => fmtNum(r.capacity) },
+    { key: "fill", label: "Fill", sort: (r) => r.stock / (r.capacity || 1), render: (r) => { const p = 100 * r.stock / (r.capacity || 1); return el("div", { class: "fill" + (Number(r.is_full) ? " full" : ""), title: fmtPct(p) }, el("span", { style: `width:${Math.min(100, p)}%` })); } },
+    { key: "is_full", label: "", render: (r) => (Number(r.is_full) ? el("span", { class: "badge full", text: "full" }) : "") },
+  ],
+  seriesPath: (item) => `/api/series/depot/${encodeURIComponent(item)}`, cols2: ["stock", "capacity"], unit: "", fmt: (v) => fmtNum(v, 0),
+  seriesOf: (row) => [
+    { label: "Stock", data: row.stock, color: cssVar("--s1") },
+    { label: "Capacity", data: row.capacity, color: cssVar("--s4"), dash: [4, 4] },
+  ],
+});
+
+async function tabSites(main) {
+  const sites = state.latest?.sites ?? [];
+  if (!sites.length) { main.append(el("div", { class: "empty", text: "No site samples yet." })); return; }
+  const resolved = sites.filter((r) => r.site_id != null);
+  if (state.sel.site == null || !resolved.some((r) => r.site_id === state.sel.site)) state.sel.site = resolved[0]?.site_id ?? null;
+  const grid = el("div", { class: "grid wide" });
+  main.append(grid);
+  const card = el("div", { class: "card" }, el("h2", {}, "Sites", el("span", { class: "hint", text: "machines by state, newest tick · click a site to chart it" })), stateLegend());
+  card.append(table(sites, [
+    { key: "name", label: "Site", render: (r) => r.name ?? `unresolved (${fmtNum(r.center_x / 100)}, ${fmtNum(r.center_y / 100)})` },
+    { key: "machines", label: "Machines", num: true },
+    { key: "bar", label: "States", render: stateBar, sort: (r) => Number(r.running) / (Number(r.machines) || 1) },
+    ...STATES.map((s) => ({ key: s, label: s, num: true })),
+    { key: "mw_draw", label: "MW", num: true, render: (r) => fmtNum(r.mw_draw, 0) },
+    { key: "avg_productivity", label: "Prod. %", num: true, render: (r) => fmtPct(r.avg_productivity) },
+  ], { initialSort: { key: "machines", dir: -1 }, selected: (r) => r.site_id != null && r.site_id === state.sel.site, onRow: (r) => { if (r.site_id == null) return; state.sel.site = r.site_id; renderTab(); } }));
+  grid.append(card);
+  if (state.sel.site == null) return;
+  const site = sites.find((r) => r.site_id === state.sel.site);
+  const { card: c2, host } = chartCard(`${site?.name ?? "site " + state.sel.site} · machines by state`);
+  grid.append(c2);
+  const pv = pivot(asSeriesList(await api(seriesUrl(`/api/series/site/${state.sel.site}`))), () => "k", ["running", "blocked", "starved", "unpowered", "machines", "mw_draw"]);
+  const row = pv.keys.get("k");
+  lineChart(host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), series: row ? [
+    { label: "Running", data: row.running, color: cssVar("--good") },
+    { label: "Blocked", data: row.blocked, color: cssVar("--warning") },
+    { label: "Starved", data: row.starved, color: cssVar("--serious") },
+    { label: "Unpowered", data: row.unpowered, color: cssVar("--critical") },
+    { label: "Total", data: row.machines, color: cssVar("--muted"), dash: [4, 4] },
+  ] : [] });
+  c2.append(el("div", { class: "chart-note", text: resNote(pv) }));
+}
+
+async function tabGens(main) {
+  const gens = state.latest?.gens ?? [];
+  if (!gens.length) { main.append(el("div", { class: "empty", text: "No generator samples yet." })); return; }
+  const grid = el("div", { class: "grid wide" });
+  main.append(grid);
+  const card = el("div", { class: "card" }, el("h2", {}, "Generators", el("span", { class: "hint", text: "per fuel type and field, newest tick" })));
+  card.append(table(gens, [
+    { key: "name", label: "Field", render: (r) => r.name ?? `unresolved (${fmtNum(r.center_x / 100)}, ${fmtNum(r.center_y / 100)})` },
+    { key: "fuel_type", label: "Fuel" },
+    { key: "total", label: "Generators", num: true },
+    { key: "fueled", label: "Fueled", num: true },
+    { key: "dry", label: "Dry", num: true, render: (r) => el("span", { class: Number(r.dry) ? "neg" : null, text: fmtNum(r.dry) }) },
+    { key: "capacity_mw", label: "Capacity", num: true, render: (r) => fmtMW(r.capacity_mw) },
+  ], { initialSort: { key: "capacity_mw", dir: -1 } }));
+  grid.append(card);
+  const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/gens"))), (p) => String(p.fuel_type), ["dry", "fueled", "capacity_mw"]);
+  const a = chartCard("Dry generators", "map-wide, per fuel type"); grid.append(a.card);
+  lineChart(a.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), height: 200, series: [...pv.keys].map(([k, row]) => ({ label: k, data: row.dry })) });
+  const b = chartCard("Generator capacity", "map-wide, per fuel type"); grid.append(b.card);
+  lineChart(b.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: " MW", fmt: (v) => fmtNum(v, 0), height: 200, series: [...pv.keys].map(([k, row]) => ({ label: k, data: row.capacity_mw })) });
+  a.card.append(el("div", { class: "chart-note", text: resNote(pv) }));
+}
+
+async function tabSinks(main) {
+  const grid = el("div", { class: "grid" });
+  main.append(grid);
+  const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/sinks"))), (p) => String(p.sink), ["coupons", "points_per_min", "points_to_next"]);
+  const label = (k) => (k === "resource" ? "AWESOME Sink" : k === "exploration" ? "Exploration sink" : k);
+  const a = chartCard("Coupons"); grid.append(a.card);
+  lineChart(a.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), series: [...pv.keys].map(([k, row]) => ({ label: label(k), data: row.coupons })) });
+  const b = chartCard("Points per minute"); grid.append(b.card);
+  lineChart(b.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), series: [...pv.keys].map(([k, row]) => ({ label: label(k), data: row.points_per_min })) });
+  const c = chartCard("Points to next coupon"); grid.append(c.card);
+  lineChart(c.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), series: [...pv.keys].map(([k, row]) => ({ label: label(k), data: row.points_to_next })) });
+  a.card.append(el("div", { class: "chart-note", text: resNote(pv) }));
+}
+
+const RENDER = { overview: tabOverview, power: tabPower, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
+
+let renderSeq = 0;
+async function renderTab() {
+  const seq = ++renderSeq;
+  const main = $("#main");
+  main.classList.add("faded");
+  destroyCharts();
+  const next = el("div");
+  try {
+    await RENDER[state.tab]?.(next);
+    if (seq !== renderSeq) return;
+    main.replaceChildren(...next.childNodes);
+  } catch (e) {
+    if (e instanceof LoginRequired) { showLogin(); return; }
+    console.error(e);
+    main.replaceChildren(el("div", { class: "empty error", text: `Failed to load: ${e.message}` }));
+  } finally {
+    main.classList.remove("faded");
+  }
+}
+
+// ---------------------------------------------------------------- loading
+
+async function refreshStatus() {
+  try { state.status = await api("/api/status"); } catch (e) { if (e instanceof LoginRequired) return showLogin(); state.status = { reachable: false, error: e.message, sampler: {} }; }
+  renderStatus();
+}
+
+async function refreshAll() {
+  $("#refresh").disabled = true;
+  try {
+    const [status, latest] = await Promise.all([api("/api/status").catch((e) => { if (e instanceof LoginRequired) throw e; return { reachable: false, error: e.message, sampler: {} }; }), api("/api/latest")]);
+    state.status = status; state.latest = latest;
+    renderStatus();
+    await renderTab();
+  } catch (e) {
+    if (e instanceof LoginRequired) showLogin(); else $("#main").replaceChildren(el("div", { class: "empty error", text: `Failed to load: ${e.message}` }));
+  } finally { $("#refresh").disabled = false; }
+}
+
+// ---------------------------------------------------------------- auth
+
+function showLogin() { $("#login").hidden = false; $("#logout").hidden = true; }
+function hideLogin() { $("#login").hidden = true; $("#logout").hidden = false; }
+
+async function bootAuth() {
+  const { hanko_api } = await api("/config");
+  const { hanko } = await register(hanko_api, { cookieSameSite: "lax" });
+  state.hanko = hanko;
+  $("#hanko-mount").replaceChildren(el("hanko-auth"));
+  hanko.onSessionCreated(() => { hideLogin(); refreshAll(); });
+  hanko.onSessionExpired(() => showLogin());
+  hanko.onUserLoggedOut(() => showLogin());
+  $("#logout").addEventListener("click", async () => { try { await hanko.logout(); } catch {} showLogin(); });
+  try { await api("/api/me"); hideLogin(); return true; }
+  catch (e) {
+    if (e instanceof LoginRequired) { showLogin(); return false; }
+    // 403: signed in to Hanko, but not on the allow-list.
+    showLogin(); const err = $("#login-error"); err.textContent = e.message; err.hidden = false; return false;
+  }
+}
+
+// ---------------------------------------------------------------- main
+
+$("#tz").addEventListener("click", (e) => { const b = e.target.closest("button"); if (!b) return; state.tz = b.dataset.tz; store("tz", state.tz); renderControls(); renderStatus(); renderTab(); });
+$("#refresh").addEventListener("click", refreshAll);
+renderControls();
+renderStatus();
+if (await bootAuth()) await refreshAll();
+setInterval(() => { if ($("#login").hidden) refreshStatus(); }, 60_000);
