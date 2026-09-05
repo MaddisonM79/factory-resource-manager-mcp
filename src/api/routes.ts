@@ -1,13 +1,14 @@
 // Read API for the history tables and the live KV ring. Mounted behind the OAuth
 // provider at /api/ (same bearer token as /mcp) and behind the Hanko session check
-// on the dashboard host. Read-only except renaming lookup rows. Only /api/status and
-// /api/emergency reach the FRM tunnel, with cheap calls, so the dashboard can say
-// "running" and "reserve ready" from a live answer rather than from sampler staleness.
+// on the dashboard host. Read-only except renaming lookup rows. Only /api/status,
+// /api/emergency and /api/trains reach the FRM tunnel, so the dashboard's live views
+// come from a live answer rather than from sampler staleness.
 
 import { Hono } from "hono";
 import { type Env, readSamples, frmGet, asArray, loc } from "../frm/client.ts";
 import { RAW_RETENTION_SECONDS, pickRes, type Res } from "../history/history.ts";
 import { emergencyReport } from "../frm/emergency.ts";
+import { trainsReport } from "../frm/trains.ts";
 import { readSeries, readVisits, readLatest, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
 
 export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
@@ -83,6 +84,12 @@ api.get("/api/emergency", async (c) => {
   if (!Number.isFinite(min) || min < 0 || min > 100) throw new BadRequest("min_charge_pct must be 0..100");
   const [switches, power] = await Promise.all([frmGet(c.env, "getSwitches"), frmGet(c.env, "getPower")]);
   return c.json({ now: Math.floor(Date.now() / 1000), ...emergencyReport(switches, power, { minChargePct: min }) });
+});
+
+/** Rail network, live: trains with timetables and cargo, stations with platforms, docked and inbound. */
+api.get("/api/trains", async (c) => {
+  const [trains, stations] = await Promise.all([frmGet(c.env, "getTrains"), frmGet(c.env, "getTrainStation")]);
+  return c.json({ now: Math.floor(Date.now() / 1000), ...trainsReport(trains, stations) });
 });
 
 api.get("/api/latest", async (c) => {

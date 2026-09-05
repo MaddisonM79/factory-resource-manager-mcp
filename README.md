@@ -138,6 +138,7 @@ windows of ≤ 7 days inside raw retention, hourly otherwise.
 ```
 GET /api/status                        live getSessionInfo + getPlayer, plus sampler staleness
 GET /api/emergency                     live dark-restart readiness (?min_charge_pct=95)
+GET /api/trains                        live trains (timetable, cargo, errors) and stations (platforms, docked, inbound, scheduled)
 GET /api/latest                        newest tick from every table, sites/fields resolved to names
 GET /api/live                          KV ring + staleness_seconds (?minutes=)
 GET /api/series/power                  ?group= for one circuit group
@@ -164,7 +165,11 @@ no build step. It shows whether the game answered just now (`/api/status`
 calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
 reaches the tunnel), then tabs for power per circuit group, item production
 vs consumption, sites by machine state, generator fields, the depot, and the
-sinks, and an Emergency tab for the dark-restart reserves. Every chart takes the same time range (1 h to 30 d) and a Local / UTC
+sinks, an Emergency tab for the dark-restart reserves, and a Trains tab
+(every train with its timetable, cargo and errors; every station with its
+platforms, what is docked or inbound and which trains schedule it; the dock
+history from `train_visits` with dwell and cargo moved; a station's transfer
+rate over time). Every chart takes the same time range (1 h to 30 d) and a Local / UTC
 toggle in the header; outages are shaded, save reloads are marked with the
 session name, and nothing is interpolated across either. Tables come from
 `/api/latest`, the newest tick from every history table with sites and

@@ -6,7 +6,7 @@ import { register } from "/vendor/hanko-elements.js";
 // ---------------------------------------------------------------- state
 
 const RANGES = [["1h", 3600], ["6h", 6 * 3600], ["24h", 24 * 3600], ["7d", 7 * 86400], ["30d", 30 * 86400]];
-const TABS = [["overview", "Overview"], ["power", "Power"], ["emergency", "Emergency"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
+const TABS = [["overview", "Overview"], ["power", "Power"], ["emergency", "Emergency"], ["trains", "Trains"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
 const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
 const STATES = ["running", "blocked", "starved", "unpowered", "paused", "unconfigured", "idle"];
 
@@ -197,7 +197,7 @@ function destroyCharts() { for (const c of state.charts) { c.ro.disconnect(); c.
 // ---------------------------------------------------------------- tables
 
 /** Sortable table. cols: [{ key, label, num?, render?(row) -> node|string, sort?(row) -> comparable }]. */
-function table(rows, cols, { onRow, selected, initialSort } = {}) {
+function table(rows, cols, { onRow, selected, initialSort, expand } = {}) {
   let sortKey = initialSort?.key ?? cols[0].key, dir = initialSort?.dir ?? 1;
   const wrap = el("div", { class: "tablewrap" });
   const render = () => {
@@ -206,8 +206,13 @@ function table(rows, cols, { onRow, selected, initialSort } = {}) {
     const sorted = [...rows].sort((a, b) => { const x = val(a), y = val(b); if (x == null) return 1; if (y == null) return -1; return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * dir; });
     const t = el("table", {},
       el("thead", {}, el("tr", {}, cols.map((col) => el("th", { class: col.num ? "num" : null, onclick: () => { if (sortKey === col.key) dir = -dir; else { sortKey = col.key; dir = col.num ? -1 : 1; } render(); } }, col.label + (sortKey === col.key ? (dir > 0 ? " ▲" : " ▼") : ""))))),
-      el("tbody", {}, sorted.map((r) => el("tr", { class: selected && selected(r) ? "sel" : null, onclick: onRow ? () => onRow(r) : null },
-        cols.map((col) => { const v = col.render ? col.render(r) : r[col.key]; return el("td", { class: [col.num ? "num" : "", col.key === "name" || col.key === "item" ? "name" : ""].join(" ").trim() || null, title: typeof v === "string" && v.length > 24 ? v : null }, v ?? "–"); })))),
+      el("tbody", {}, sorted.flatMap((r) => {
+        const isSel = !!(selected && selected(r));
+        const tr = el("tr", { class: isSel ? "sel" : null, onclick: onRow ? () => onRow(r) : null },
+          cols.map((col) => { const v = col.render ? col.render(r) : r[col.key]; return el("td", { class: [col.num ? "num" : "", col.key === "name" || col.key === "item" ? "name" : "", col.wrap ? "wrap" : ""].join(" ").trim() || null, title: typeof v === "string" && v.length > 24 && !col.wrap ? v : null }, v ?? "–"); }));
+        const drawer = isSel && expand ? expand(r) : null;
+        return drawer ? [tr, el("tr", { class: "drawer" }, el("td", { colspan: String(cols.length) }, drawer))] : [tr];
+      })),
     );
     wrap.replaceChildren(t);
   };
@@ -560,7 +565,112 @@ async function tabEmergency(main) {
   }
 }
 
-const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
+// ---------------------------------------------------------------- trains
+
+const STATE_PILL = { moving: "ok", docked: "ok", stopped: "warn", derailed: "bad" };
+const cargoText = (cargo, n = 2) => (cargo.length ? cargo.slice(0, n).map((c) => `${fmtNum(c.amount)} ${c.name}`).join(", ") + (cargo.length > n ? ` +${cargo.length - n}` : "") : "empty");
+const dwell = (v, now) => { const end = v.departed_ts ?? now; return fmtDur(end - v.arrived_ts) + (v.departed_ts == null ? " (still docked)" : ""); };
+
+function visitsTable(visits, now, { hideStation, hideTrain } = {}) {
+  if (!visits.length) return el("div", { class: "chart-empty", text: "No dock visits in this range." });
+  const cols = [
+    { key: "arrived_ts", label: "Arrived", num: true, render: (v) => fmtTime(v.arrived_ts) },
+    ...(hideStation ? [] : [{ key: "station", label: "Station" }]),
+    ...(hideTrain ? [] : [{ key: "train", label: "Train" }]),
+    { key: "dwell", label: "Dwell", num: true, sort: (v) => (v.departed_ts ?? now) - v.arrived_ts, render: (v) => dwell(v, now) },
+    { key: "delta_cargo", label: "Cargo moved", num: true, render: (v) => (v.delta_cargo == null ? "–" : signed(v.delta_cargo, 0)) },
+  ];
+  return table(visits, cols, { initialSort: { key: "arrived_ts", dir: -1 } });
+}
+
+async function tabTrains(main) {
+  const { from, to } = window_();
+  const [r, vis] = await Promise.all([api("/api/trains"), api(`/api/visits?from=${from}&to=${to}`)]);
+  const visits = vis.visits ?? [];
+  const c = r.counts;
+  const tile = (k, v, d, cls) => el("div", { class: "tile" }, el("div", { class: "k", text: k }), el("div", { class: "v", text: String(v) }), d ? el("div", { class: "d " + (cls ?? ""), text: d }) : null);
+  const withErrors = r.trains.filter((t) => t.errors.length);
+  main.append(el("div", { class: "tiles" },
+    tile("Trains", c.trains, `${c.moving} moving · ${c.docked} docked · ${c.stopped} stopped`),
+    tile("Derailed", c.derailed, c.derailed ? "needs a visit" : "none", c.derailed ? "bad" : "ok"),
+    tile("Stations", c.stations, `${c.platforms} freight platforms`),
+    tile("Dock visits", visits.length, `in the last ${state.range}`),
+    tile("Errors", withErrors.length, withErrors.map((t) => t.name).slice(0, 3).join(", ") || "none", withErrors.length ? "bad" : "ok"),
+  ));
+  if (!r.trains.length && !r.stations.length) { main.append(el("div", { class: "empty", text: "No trains or stations in this save." })); return; }
+  const currentNames = new Set(r.trains.map((t) => t.name));
+  const section = (title, hint, node) => main.append(el("div", { class: "grid wide" }, el("div", { class: "card" }, el("h2", {}, title, el("span", { class: "hint", text: hint })), node)));
+  const h3 = (t) => el("h3", { text: t });
+
+  // ---- trains
+  const trainDetail = (t) => {
+    // History is keyed by the train's name at the time. A renamed train's old visits show up at its
+    // stations under a name no current train has; attach those, labelled, rather than show nothing.
+    let mine = visits.filter((v) => v.train === t.name);
+    let renamedNote = null;
+    if (!mine.length && t.timetable.length) {
+      const orphans = visits.filter((v) => t.timetable.includes(v.station) && !currentNames.has(v.train));
+      const names = [...new Set(orphans.map((v) => v.train))];
+      if (names.length === 1) { mine = orphans; renamedNote = `visits recorded under the name ${names[0]}; the sampler keys history by train name, so a rename starts fresh`; }
+    }
+    return el("div", { class: "drawer-grid" },
+      el("div", {}, el("div", { class: "muted small", text: `${t.status} · ${t.speed} km/h · ${t.locomotives} loco + ${t.cars - t.locomotives} cars · ${fmtNum(t.powerMW, 1)} MW · at ${t.location}` }),
+        t.errors.length ? el("ul", { class: "issues" }, t.errors.map((e) => el("li", { text: e }))) : null,
+        h3("Timetable"), el("ol", { class: "timetable" }, t.timetable.map((stop, i) => el("li", { class: i === t.timetableIndex ? "cur" : null }, el("a", { href: "#", onclick: (e) => { e.preventDefault(); state.sel.station = stop; renderTab(); } }, stop), i === t.timetableIndex ? el("span", { class: "pill ok", text: t.state === "docked" ? "here" : "next" }) : null))),
+        h3(`Cargo · ${fmtPct(t.payloadPct)} of ${fmtNum(t.maxPayloadT)} t`), t.cargo.length ? el("ul", { class: "plain" }, t.cargo.map((x) => el("li", { text: `${fmtNum(x.amount)} ${x.name}` }))) : el("p", { class: "muted small", text: "empty" })),
+      el("div", { class: "span2" }, h3(`Dock history · last ${state.range}`), renamedNote ? el("p", { class: "muted small", text: renamedNote }) : null, visitsTable(mine, r.now, { hideTrain: true })));
+  };
+  if (state.sel.train != null && !r.trains.some((t) => t.name === state.sel.train)) state.sel.train = null;
+  const trainCols = [
+    { key: "name", label: "Train" },
+    { key: "state", label: "State", render: (t) => el("span", { class: "pill " + STATE_PILL[t.state], text: t.state }) },
+    { key: "stop", label: "Stop", sort: (t) => t.nextStop ?? t.station ?? "", render: (t) => (t.state === "docked" ? `at ${t.station ?? "?"}` : `→ ${t.nextStop ?? t.station ?? "?"}`) },
+    { key: "speed", label: "km/h", num: true },
+    { key: "payloadPct", label: "Payload", num: true, render: (t) => fmtPct(t.payloadPct) },
+    { key: "cargo", label: "Cargo", wrap: true, sort: (t) => t.cargo.reduce((n, x) => n + x.amount, 0), render: (t) => cargoText(t.cargo, 3) },
+    { key: "errors", label: "Errors", wrap: true, sort: (t) => t.errors.length, render: (t) => (t.errors.length ? el("span", { class: "neg", text: t.errors.join("; ") }) : "") },
+  ];
+  section("Trains", "live · click a train to open it", table(r.trains, trainCols, { initialSort: { key: "name", dir: 1 }, selected: (t) => t.name === state.sel.train, onRow: (t) => { state.sel.train = state.sel.train === t.name ? null : t.name; renderTab(); }, expand: trainDetail }));
+
+  // ---- stations
+  const stationDetail = (st) => {
+    const { card, host } = chartCard("Transfer rate per platform");
+    card.className = "";
+    (async () => {
+      try {
+        const pv = pivot(asSeriesList(await api(seriesUrl(`/api/series/station/${encodeURIComponent(st.name)}`))), (p) => String(p.platform), ["transfer_rate"]);
+        lineChart(host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", height: 160, fmt: (v) => fmtNum(v, 2), series: [...pv.keys].map(([k, row]) => ({ label: `Platform ${Number(k) + 1}`, data: row.transfer_rate })) });
+        card.append(el("div", { class: "chart-note", text: resNote(pv) }));
+      } catch (e) { if (e instanceof LoginRequired) return showLogin(); host.replaceChildren(el("div", { class: "chart-empty error", text: String(e.message) })); }
+    })();
+    return el("div", { class: "drawer-grid" },
+      el("div", { class: "span2" }, el("div", { class: "muted small", text: `${st.platforms.length} platforms · transfer ${fmtNum(st.transferRate, 2)} · at ${st.location}${st.fuseTripped ? " · FUSE TRIPPED" : ""}` }),
+        h3("Platforms"), table(st.platforms, [
+          { key: "index", label: "#", num: true, render: (p) => String(p.index + 1) },
+          { key: "mode", label: "Mode" },
+          { key: "status", label: "Status" },
+          { key: "docking", label: "Docking" },
+          { key: "stock", label: "Stock", num: true, render: (p) => fmtNum(p.stock) },
+          { key: "inventory", label: "Items", wrap: true, sort: (p) => p.stock, render: (p) => cargoText(p.inventory) },
+          { key: "transferRate", label: "Transfer", num: true, render: (p) => fmtNum(p.transferRate, 2) },
+        ], { initialSort: { key: "index", dir: 1 } }),
+        h3("Scheduled trains"), st.scheduled.length ? el("ul", { class: "plain" }, st.scheduled.map((n) => el("li", {}, el("a", { href: "#", onclick: (e) => { e.preventDefault(); state.sel.train = n; renderTab(); } }, n)))) : el("p", { class: "muted small", text: "no train has this station on its timetable" })),
+      el("div", { class: "span2" }, h3(`Dock history · last ${state.range}`), visitsTable(visits.filter((v) => v.station === st.name), r.now, { hideStation: true }), h3("Transfer rate per platform"), card));
+  };
+  if (state.sel.station != null && !r.stations.some((s) => s.name === state.sel.station)) state.sel.station = null;
+  const stationCols = [
+    { key: "name", label: "Station" },
+    { key: "platforms", label: "Platforms", sort: (s) => s.platforms.length, render: (s) => s.platforms.map((p) => (p.mode === "load" ? "L" : "U")).join(" ") || "none" },
+    { key: "stock", label: "Stock", num: true, render: (s) => fmtNum(s.stock) },
+    { key: "top", label: "Items", wrap: true, sort: (s) => s.topItems[0]?.amount ?? 0, render: (s) => cargoText(s.topItems) },
+    { key: "docked", label: "Docked", render: (s) => s.docked ?? "" },
+    { key: "inbound", label: "Inbound", wrap: true, sort: (s) => s.inbound.length, render: (s) => s.inbound.join(", ") },
+    { key: "scheduled", label: "Scheduled by", wrap: true, sort: (s) => s.scheduled.length, render: (s) => s.scheduled.join(", ") },
+  ];
+  section("Stations", "live · click a station to open it", table(r.stations, stationCols, { initialSort: { key: "name", dir: 1 }, selected: (s) => s.name === state.sel.station, onRow: (s) => { state.sel.station = state.sel.station === s.name ? null : s.name; renderTab(); }, expand: stationDetail }));
+}
+
+const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, trains: tabTrains, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
 
 let renderSeq = 0;
 async function renderTab() {
