@@ -135,13 +135,30 @@ CREATE TABLE hourly_sink (
 CREATE INDEX hourly_sink_session_ts ON hourly_sink (session, bucket_ts);
 
 -- ---------------------------------------------------------------- lookups
--- Cluster centers in FRM map units (cm). Coordinates are NULL until the sampler seeds them
--- from the first live tick (largest clusters first); rename via PATCH /api/lookup/sites/:id.
+-- Cluster centers in FRM map units (cm), seeded from the live save on 2026-09-05 (site_status,
+-- 200 m radius, largest cluster first). Names are guesses from the dominant recipes; rename via
+-- PATCH /api/lookup/sites/:id. Rows whose coordinates are NULL get filled by the sampler's first
+-- live tick, so extra rows can be added with just a name.
 CREATE TABLE sites (id INTEGER PRIMARY KEY, name TEXT NOT NULL, x REAL, y REAL, z REAL);
 CREATE TABLE fields (id INTEGER PRIMARY KEY, name TEXT NOT NULL, x REAL, y REAL, z REAL);
 
-INSERT INTO sites (id, name) VALUES
-  (1, 'Site 1'), (2, 'Site 2'), (3, 'Site 3'), (4, 'Site 4'), (5, 'Site 5'), (6, 'Site 6'),
-  (7, 'Site 7'), (8, 'Site 8'), (9, 'Site 9'), (10, 'Site 10'), (11, 'Site 11');
-INSERT INTO fields (id, name) VALUES
-  (1, 'Field 1'), (2, 'Field 2'), (3, 'Field 3'), (4, 'Field 4');
+INSERT INTO sites (id, name, x, y, z) VALUES
+  (1,  'HOME Iron & Steel Parts',        -30859, 266598,  1100),   -- 69 machines: iron ingot, iron wire, steel cast plate
+  (2,  'HOME Copper & Steel Pipe',       -60594, 263146,  1536),   -- 67: copper ingot, wire, steel pipe, solid steel
+  (3,  'EAST Oil: Diluted Fuel',         147966, 210002, -4697),   -- 64: heavy oil residue, diluted fuel, residual plastic
+  (4,  'Aluminum Plateau',                -5661,  38709, 24500),   -- 54: pure aluminum ingot, electrode scrap
+  (5,  'Caterium / Quickwire',          -149300, 216600, -1600),   -- 48: quickwire, pure caterium ingot
+  (6,  'COAST Oil: Fuel/Rubber/Plastic', -238787, 151418,  -700),   -- 39: fuel, rubber, plastic
+  (7,  'HOME Copper Sheet & Wiring',     -79718, 228086,   938),   -- 29: steamed copper sheet, wire, automated wiring
+  (8,  'HOME Biofuel',                   -33462, 242025, -1675),   -- 8: biomass, solid/liquid biofuel
+  (9,  'Wet Concrete',                    26800, 252700,   300),   -- 8: wet concrete
+  (10, 'Petroleum Coke',                  54400,   2300, 13600),   -- 8: heavy oil residue, petroleum coke
+  (11, 'QZS Quartz & Silica',             49820, 206040, -4900);   -- 5: pure quartz crystal, cheap silica
+
+-- Generator fields from getGenerators (177 fuel generators + 2 HUB biomass burners), same clustering.
+INSERT INTO fields (id, name, x, y, z) VALUES
+  (1, 'EAST Fuel Plant North',  112800, 237600,  -500),   -- 60 fuel generators
+  (2, 'EAST Fuel Plant South',  143200, 179600, -3800),   -- 60 fuel generators
+  (3, 'COAST Fuel Plant',      -259000, 175200,  -700),   -- 50 fuel generators
+  (4, 'COAST Fuel Row',        -231000, 162200,  -700),   -- 5 fuel generators, 274 m from the plant so a cluster of its own
+  (5, 'HUB Burners',            -35750, 241351, -2455);   -- 2 biomass burners + 2 fuel generators

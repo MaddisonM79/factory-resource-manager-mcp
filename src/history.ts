@@ -11,7 +11,7 @@ export const CLUSTER_RADIUS_CM = 200 * 100;
 /** Hourly site/gen rows are grouped by this cell size of the cluster center (cm). */
 export const CELL_CM = 100 * 100;
 export const SEED_SITES = 11;
-export const SEED_FIELDS = 4;
+export const SEED_FIELDS = 5;
 /** Consecutive gap rows closer than this are one outage. */
 export const GAP_MERGE_SECONDS = 2 * TICK_SECONDS;
 
@@ -168,32 +168,37 @@ export interface GenRow {
   total: number; fueled: number; dry: number; capacity_mw: number;
 }
 
-/** "Build_GeneratorCoal_C" -> "Coal"; falls back to the display name. */
+/** "Build_GeneratorCoal_C" -> "Coal", "Build_GeneratorIntegratedBiomass_C" -> "Biomass"; falls back to the display name. */
 export function fuelTypeOf(g: any): string {
-  const m = /Generator([A-Za-z]+)/.exec(String(g?.ClassName ?? ""));
-  return m ? m[1] : String(g?.Name ?? "Unknown");
+  const m = /Generator(?:Integrated)?([A-Za-z]+?)(?:_C)?$/.exec(String(g?.ClassName ?? ""));
+  if (!m) return String(g?.Name ?? "Unknown");
+  return m[1] === "GeoThermal" ? "Geothermal" : m[1];
 }
 
-/** FRM has renamed fuel fields across versions; accept a count, an item, or an item list. */
+/**
+ * Current fuel on hand. Live FRM: `FuelAmount` is a number (fraction of the current unit for
+ * liquid fuel); `FuelInventory` is the solid-fuel item list. `AvailableFuel` is the list of fuel
+ * types the generator accepts, not stock, and must never be read as an amount.
+ */
 export function fuelAmount(g: any): number | null {
-  for (const k of ["FuelInventory", "Fuel", "AvailableFuel", "FuelAmount"]) {
-    const v = g?.[k];
-    if (typeof v === "number") return v;
-    if (Array.isArray(v)) return v.reduce((n: number, i: any) => n + num(i?.Amount ?? i?.amount), 0);
-    if (v && typeof v === "object" && (v.Amount != null || v.amount != null)) return num(v.Amount ?? v.amount);
-  }
+  if (typeof g?.FuelAmount === "number") return g.FuelAmount;
+  const inv = g?.FuelInventory;
+  if (typeof inv === "number") return inv;
+  if (Array.isArray(inv)) return inv.reduce((n: number, i: any) => n + num(i?.Amount ?? i?.amount), 0);
   return null;
 }
 
+/** A generator is dry when it has no fuel and the game says it cannot start. Geothermal never needs fuel. */
 export function isFueled(g: any): boolean {
-  const producing = !!(g?.IsProducing ?? g?.CanStart ?? num(g?.BaseProd) > 0);
-  if (/geo/i.test(fuelTypeOf(g))) return producing;
+  if (fuelTypeOf(g) === "Geothermal") return true;
+  if (g?.CanStart === true) return true;
   const amt = fuelAmount(g);
-  return amt == null ? producing : amt > 0;
+  return amt != null ? amt > 0 : !!(g?.IsProducing ?? g?.IsFullSpeed);
 }
 
+/** Live FRM exposes ProductionCapacity (and BaseProd, the same number for fuel generators). */
 export const genCapacityMw = (g: any): number =>
-  num(g?.ProductionCapacity) || num(g?.PowerInfo?.PowerCapacity) || num(g?.BaseProd) + num(g?.DynamicProdCapacity);
+  num(g?.ProductionCapacity) || num(g?.PowerProductionPotential) || num(g?.BaseProd) + num(g?.DynamicProdCapacity);
 
 /** One row per (fuel type, spatial cluster) with field_id null, plus one map-wide row per fuel type with field_id 0. */
 export function genRows(generators: unknown, radiusCm = CLUSTER_RADIUS_CM): GenRow[] {

@@ -26,7 +26,7 @@ test("a good tick writes every table in one batch; a gap tick writes only gap_sa
     assert.ok(db.count(t) > 0, `${t} has rows`);
   }
   assert.deepEqual(db.rows("SELECT ts, epoch, reason FROM gap_samples"), [{ ts: T0 + 300, epoch: 1, reason: "FRM origin unreachable (530)" }]);
-  assert.equal(db.count("sites", "x IS NOT NULL"), 2, "lookup coordinates seeded from the first tick");
+  assert.equal(db.count("sites", "x IS NOT NULL"), 11, "migration seeds coordinates; the first tick only fills NULL rows");
 });
 
 test("gaps are reported, never interpolated: no points at gap ticks, rates restart after the gap", async () => {
@@ -131,8 +131,11 @@ test("site and field series resolve clusters by nearest center; unresolved clust
   const db = d1();
   // Three sites; the lookup table has coordinates for two of them.
   const factory = [machine(0, 0), machine(10 * M, 0), machine(5000 * M, 0), machine(-5000 * M, -5000 * M)];
+  // Start from an unseeded lookup table so the first tick fills sites 1..3 in size order; then blank
+  // site 3 so one cluster is unresolvable, and rename site 1.
+  db.prepare("UPDATE sites SET x = NULL, y = NULL, z = NULL").run();
   await drive(db, [{ ts: T0, snap: { factory } }, { ts: T0 + 300, snap: { factory, play: 1300 } }]);
-  // Seeding filled sites 1..3 in size order; blank site 3 so one cluster is unresolvable, and rename site 1.
+  assert.equal(db.count("sites", "x IS NOT NULL"), 3, "three clusters seeded into the blank rows");
   db.prepare("UPDATE sites SET x = NULL, y = NULL, z = NULL WHERE id = 3").run();
   assert.equal((await updateLookup(db, "sites", 1, { name: "Iron Row" }))?.name, "Iron Row");
   assert.equal((await listLookup(db, "sites")).find((s) => s.id === 1)?.name, "Iron Row");
@@ -151,7 +154,10 @@ test("site and field series resolve clusters by nearest center; unresolved clust
 
   const [gAll] = await readSeries(db, { kind: "gens", from: T0, to: T0, res: "raw" });
   assert.deepEqual(gAll.points.map((p) => [p.fuel_type, p.field_id, p.total]), [["Coal", 0, 2], ["Fuel", 0, 1]]);
-  const [g1] = await readSeries(db, { kind: "gens", key: "1", from: T0, to: T0, res: "raw" });
+  // Fields likewise: blank, let the tick seed them, then resolve by id.
+  db.prepare("UPDATE fields SET x = NULL, y = NULL, z = NULL").run();
+  await drive(db, [{ ts: T0 + 600, snap: { factory, play: 1600 } }]);
+  const [g1] = await readSeries(db, { kind: "gens", key: "1", from: T0 + 600, to: T0 + 600, res: "raw" });
   assert.deepEqual(g1.points.map((p) => [p.fuel_type, p.field_id, p.total]), [["Coal", 1, 2]]);
 });
 
@@ -160,6 +166,7 @@ test("hourly site rows are merged per bucket after resolution", async () => {
   const now = T0 + 30 * 24 * HOUR;
   const old = rollupCutoff(now) - 3 * HOUR;
   // A cluster whose center straddles a 100 m cell boundary between ticks: two hourly rows, one site.
+  db.prepare("UPDATE sites SET x = NULL, y = NULL, z = NULL").run();
   await drive(db, [
     { ts: old, snap: { factory: [machine(99 * M, 0), machine(99 * M, 0)], play: 1 } },
     { ts: old + 300, snap: { factory: [machine(101 * M, 0), machine(101 * M, 0)], play: 2 } },

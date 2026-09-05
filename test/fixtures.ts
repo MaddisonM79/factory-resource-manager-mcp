@@ -19,9 +19,12 @@ export const machine = (x: number, y: number, o: Partial<{ IsProducing: boolean;
   ingredients: [{ Name: "Iron Ore" }],
 });
 
+// Shape as returned by FRM on a live save: FuelAmount is a number, CanStart flips off when dry,
+// AvailableFuel lists accepted fuel types (never stock).
 export const generator = (x: number, y: number, cls = "Build_GeneratorCoal_C", fuel = 10) => ({
-  Name: "Coal-Powered Generator", ClassName: cls, location: { x, y, z: 0 }, ProductionCapacity: 75, IsProducing: fuel > 0,
-  FuelInventory: [{ Name: "Coal", Amount: fuel }],
+  Name: "Coal-Powered Generator", ClassName: cls, location: { x, y, z: 0 }, ProductionCapacity: 75, BaseProd: 75,
+  FuelAmount: fuel, CanStart: fuel > 0, IsFullSpeed: true, LoadPercentage: fuel > 0 ? 100 : 0, FuelInventory: [],
+  AvailableFuel: [{ Name: "Coal", ClassName: "Desc_Coal_C", Amount: 300 }, { Name: "Compacted Coal", ClassName: "Desc_CompactedCoal_C", Amount: 630 }],
 });
 
 export const cloud = (amount = 50) => [{ Name: "Iron Plate", Amount: amount, MaxAmount: 100 }];

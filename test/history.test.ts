@@ -4,6 +4,7 @@ import {
   nextEpoch, cluster, resolveCenter, stepVisits, coalesceGaps, pickRes, buildTick, gapState, initialState,
   siteRows, genRows, RAW_RETENTION_SECONDS, HOUR,
 } from "../src/history.ts";
+import { fuelTypeOf, isFueled, fuelAmount, genCapacityMw } from "../src/history.ts";
 import { snapshot, machine, generator, station, train, sink, M } from "./fixtures.ts";
 
 test("epoch: first sample is epoch 1, then bumps on session change or playtime regression", () => {
@@ -107,6 +108,24 @@ test("siteRows and genRows: states, per-field rows plus map-wide rows", () => {
   assert.equal(fields.length, 2);
   assert.deepEqual(fields.map((g) => [g.fuel_type, g.total, g.fueled, g.dry]), [["Coal", 2, 1, 1], ["Fuel", 1, 1, 0]]);
   assert.deepEqual(mapWide.map((g) => [g.fuel_type, g.total, g.capacity_mw]), [["Coal", 2, 150], ["Fuel", 1, 75]]);
+});
+
+test("generator fuel state from live FRM fields; AvailableFuel is never mistaken for stock", () => {
+  const dry = { ClassName: "Build_GeneratorFuel_C", FuelAmount: 0, CanStart: false, IsFullSpeed: true, LoadPercentage: 100, FuelInventory: [],
+    AvailableFuel: [{ Name: "Fuel", Amount: 0 }, { Name: "Turbofuel", Amount: 0 }], ProductionCapacity: 250, BaseProd: 250 };
+  assert.equal(isFueled(dry), false);
+  assert.equal(fuelAmount(dry), 0);
+  assert.equal(isFueled({ ...dry, FuelAmount: 0.11 }), true, "fuel in the tank");
+  assert.equal(isFueled({ ...dry, CanStart: true }), true, "empty tank but the game says it can start (fuel arriving)");
+  assert.equal(fuelTypeOf(dry), "Fuel");
+  assert.equal(genCapacityMw(dry), 250);
+  const hub = { ClassName: "Build_GeneratorIntegratedBiomass_C", FuelAmount: 0, CanStart: false, FuelResource: "Geothermal",
+    AvailableFuel: [{ Name: "Leaves", Amount: 15 }, { Name: "Wood", Amount: 100 }], ProductionCapacity: 20 };
+  assert.equal(fuelTypeOf(hub), "Biomass");
+  assert.equal(isFueled(hub), false, "AvailableFuel amounts are energy values of accepted fuels, not stock");
+  assert.equal(fuelTypeOf({ ClassName: "Build_GeneratorGeoThermal_C" }), "Geothermal");
+  assert.equal(isFueled({ ClassName: "Build_GeneratorGeoThermal_C", CanStart: false }), true);
+  assert.equal(fuelAmount({ ClassName: "Build_GeneratorCoal_C", FuelInventory: [{ Name: "Coal", Amount: 7 }] }), 7, "solid fuel item list");
 });
 
 test("first live tick seeds lookup coordinates, largest clusters first, once", () => {

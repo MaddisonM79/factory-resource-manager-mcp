@@ -73,6 +73,11 @@ endpoint with `limit: 1` and compare keys.
   its own `Inventory`, `LoadingMode`, `LoadingStatus`, `DockingStatus`.
 - `getBelts.ItemsPerMinute` is the tier cap, not live flow. `belt_load`
   infers problems from the machine a belt connects to instead.
+- `getGenerators`: `FuelAmount` (number), `CanStart`, `ProductionCapacity`.
+  `AvailableFuel` lists the fuel types a generator accepts, not its stock.
+  The HUB burners are `Build_GeneratorIntegratedBiomass_C`.
+- `getTrains.Docking` is `TDS_Docked` / `TDS_None`; `TrainStation` is the
+  station the train is at or heading to.
 - No per-building sink rate, no train dwell history, no depot upload rate.
   The trend tools derive rates from the sampler instead.
 
@@ -111,12 +116,14 @@ up or deleted.
 
 Sites and generator fields are spatial clusters, not stable ids. The sampler
 stores cluster centers; the read API resolves them to the `sites` / `fields`
-lookup tables by nearest center within 200 m. On the first live tick the
-sampler fills in coordinates for the 11 placeholder sites and 4 fields
-(largest clusters first); rename them with
+lookup tables by nearest center within 200 m. The migration seeds the 11
+sites and 5 generator fields of the current save with real centers and
+recipe-based names; rename them with
 `PATCH /api/lookup/sites/:id {"name": "Iron Row"}` (`x`, `y`, `z` can be
-patched too). Clusters that match nothing come back with `site_id: null`
-and their raw center.
+patched too). A lookup row whose coordinates are NULL is filled in by the
+sampler on the next live tick, largest unclaimed cluster first, so a new
+site only needs a name. Clusters that match nothing come back with
+`site_id: null` and their raw center.
 
 #### Read API
 
