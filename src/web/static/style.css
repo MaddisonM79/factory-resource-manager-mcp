@@ -103,7 +103,16 @@ tbody tr { cursor: pointer; }
 tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
 tbody tr.sel { background: color-mix(in srgb, var(--accent) 16%, transparent); }
 td.name { max-width: 260px; overflow: hidden; text-overflow: ellipsis; }
-.tablewrap { overflow: auto; max-height: 520px; }
+.tablewrap { overflow: auto; max-height: 640px; }
+td.wrap { white-space: normal; min-width: 160px; }
+tr.drawer > td { padding: 12px 14px 16px; background: color-mix(in srgb, var(--accent) 5%, transparent); cursor: default; white-space: normal; }
+tr.drawer:hover { background: transparent; }
+tr.drawer .tablewrap { max-height: 320px; }
+tr.drawer table { font-size: 13px; }
+.drawer-grid { display: grid; gap: 8px 24px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); align-items: start; }
+.drawer-grid .span2 { grid-column: span 2; }
+.drawer-grid h3:first-child { margin-top: 0; }
+@media (max-width: 900px) { .drawer-grid .span2 { grid-column: span 1; } }
 .neg { color: var(--critical); }
 .pos { color: var(--good); }
 .badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border); color: var(--ink-2); }
