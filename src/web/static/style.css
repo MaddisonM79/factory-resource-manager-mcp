@@ -139,3 +139,28 @@ hanko-auth { --brand-color: var(--accent); --font-family: system-ui, -apple-syst
   main { padding: 12px; }
   .tabs { padding: 0 12px; }
 }
+
+/* Emergency tab */
+.banner { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; background: var(--surface); }
+.banner.ok { border-color: var(--good); }
+.banner.bad { border-color: var(--critical); }
+.banner-word { font-size: 22px; font-weight: 600; }
+.banner.ok .banner-word { color: var(--good); }
+.banner.bad .banner-word { color: var(--critical); }
+.banner-sub { color: var(--ink-2); font-size: 12px; margin-top: 2px; }
+.card.card-bad { border-color: var(--critical); }
+.pill { display: inline-block; font-size: 11px; font-weight: 500; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--ink-2); }
+.pill.ok { border-color: var(--good); color: var(--good); }
+.pill.bad { border-color: var(--critical); color: var(--critical); }
+.swrow { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 6px 0; border-bottom: 1px solid var(--grid); }
+.swrow.missing { opacity: .7; }
+.swname { font-weight: 500; min-width: 200px; }
+.battery { padding: 10px 0 4px; }
+.battery .k { color: var(--ink-2); font-size: 12px; margin-bottom: 4px; }
+.battery .d { font-size: 13px; margin-top: 6px; }
+.fill.big { height: 14px; }
+.fill.big > span { background: var(--good); }
+.fill.big.low > span { background: var(--critical); }
+.issues { margin: 10px 0 0; padding-left: 18px; color: var(--critical); font-size: 13px; }
+.issues li { margin: 2px 0; }
+.issues.notes { color: var(--muted); }

@@ -18,6 +18,7 @@ import {
 } from "../../frm/client.ts";
 
 import { querySeries } from "../../api/routes.ts";
+import { emergencyReport } from "../../frm/emergency.ts";
 import { guard, history } from "../shared.ts";
 
 /** The KV ring covers 24 h; longer battery_trend windows are served from D1. */
@@ -171,6 +172,25 @@ export function registerPower(server: McpServer, env: Env): void {
             };
           });
         return { windowMinutes: window_minutes, history: history(w, sample.t), rows };
+      }),
+  );
+
+  server.registerTool(
+    "emergency_reserve",
+    {
+      description:
+        "Dark-restart readiness. Power switches named *-EMERGENCY-RESERVE gate a battery bank that must stay isolated (switch OFF) and full; " +
+        "*-TIE switches are the site's cut-off from the main grid (ON in normal operation). Switch state is on/off (FRM's IsOn); an off switch whose two sides still share a power group is bypassed by another cable path and is noted as such. Reports each site's switches, the circuit and battery behind each reserve " +
+        "(charge %, MWh, in/out MW, time to empty or full, fuse), every deviation from the normal state as a plain issue, the overall mode " +
+        "(normal, dark-restart in progress, mixed, none) and whether the reserves are ready. Live from getSwitches + getPower; nothing is sampled.",
+      inputSchema: z.object({
+        min_charge_pct: z.number().min(0).max(100).default(95).describe("a reserve battery below this is an issue"),
+      }),
+    },
+    async ({ min_charge_pct }) =>
+      guard(async () => {
+        const [switches, power] = await Promise.all([frmGet(env, "getSwitches"), frmGet(env, "getPower")]);
+        return emergencyReport(switches, power, { minChargePct: min_charge_pct });
       }),
   );
 }

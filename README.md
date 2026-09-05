@@ -52,6 +52,7 @@ service-auth policy. Nothing on the game machine is exposed to the internet.
 | `station_throughput` | Per station and platform: mode, status, cargo, rates, trains scheduled / inbound / docked |
 | `sink_rates` | AWESOME Sink coupons, points/min, ETA to next coupon, sink buildings |
 | `depot_status` | Dimensional Depot per item: stock, capacity, full, fill rate, minutes to full, when it filled |
+| `emergency_reserve` | Dark-restart readiness: `*-EMERGENCY-RESERVE` switches (off, full bank behind them) and `*-TIE` switches (on), the circuit behind each reserve, issues, mode |
 | `battery_trend` | Battery % and power deltas per circuit over a window; windows beyond 24 h are served from D1 history |
 | `trend` | Any history series (power, site, gens, depot, prod, station, sinks) over a window, from D1. Same data as `/api/series/*` |
 | `frm_get` | Any of ~75 raw FRM read endpoints with `filter` / `fields` / `limit` / `offset` |
@@ -136,6 +137,7 @@ windows of ≤ 7 days inside raw retention, hourly otherwise.
 
 ```
 GET /api/status                        live getSessionInfo + getPlayer, plus sampler staleness
+GET /api/emergency                     live dark-restart readiness (?min_charge_pct=95)
 GET /api/latest                        newest tick from every table, sites/fields resolved to names
 GET /api/live                          KV ring + staleness_seconds (?minutes=)
 GET /api/series/power                  ?group= for one circuit group
@@ -162,11 +164,24 @@ no build step. It shows whether the game answered just now (`/api/status`
 calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
 reaches the tunnel), then tabs for power per circuit group, item production
 vs consumption, sites by machine state, generator fields, the depot, and the
-sinks. Every chart takes the same time range (1 h to 30 d) and a Local / UTC
+sinks, and an Emergency tab for the dark-restart reserves. Every chart takes the same time range (1 h to 30 d) and a Local / UTC
 toggle in the header; outages are shaded, save reloads are marked with the
 session name, and nothing is interpolated across either. Tables come from
 `/api/latest`, the newest tick from every history table with sites and
 fields resolved to their lookup names.
+
+Emergency reserves are a naming convention. A power switch named
+`<SITE>-EMERGENCY-RESERVE` is expected **off** with a full battery bank behind
+it; `<SITE>-TIE` is the site's cut-off from the main grid, expected **on**.
+A dark restart turns the ties off and the reserves on. `emergency_reserve`
+and `/api/emergency` pair them by site and report every deviation: a reserve
+that is on, a bank below the threshold, a discharging or loaded reserve side,
+a tripped fuse, a tie that is off. A switch not built yet, or a side with no
+cable, is a note rather than an issue. Switch state is always on/off (FRM's
+`IsOn`); "open" is avoided because it means opposite things to different
+people. The circuit topology is a cross-check: an off switch whose two sides
+still resolve to one power group is bypassed by another cable path and does
+not isolate anything by itself, which is reported as a note.
 
 Sign-in is [Hanko](https://hanko.io): the login element stores its JWT in a
 first-party `hanko` cookie, the Worker verifies it against the project's JWKS
