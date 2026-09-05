@@ -3,7 +3,7 @@
 // carry FRM's own API key if configured.
 
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
-import type { Snapshot } from "./history.ts";
+import type { Snapshot } from "../history/history.ts";
 
 export interface Env {
   FRM_BASE_URL: string;

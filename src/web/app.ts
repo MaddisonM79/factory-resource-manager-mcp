@@ -1,4 +1,4 @@
-// The dashboard host. Static files from public/ plus the read API, gated by a Hanko
+// The dashboard host. Static files from static/ plus the read API, gated by a Hanko
 // session: the Hanko frontend SDK stores its JWT in a first-party `hanko` cookie, and
 // this verifies it against the project's JWKS and an email allow-list. The MCP host
 // and its OAuth flow never see any of this.
@@ -6,8 +6,8 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type JWTPayload } from "jose";
-import type { Env } from "./frm.ts";
-import { api, apiError } from "./api.ts";
+import type { Env } from "../frm/client.ts";
+import { api, apiError } from "../api/routes.ts";
 
 export const SESSION_COOKIE = "hanko";
 

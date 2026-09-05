@@ -157,7 +157,7 @@ Nothing under `/api` can reach the FRM tunnel.
 
 ## Dashboard
 
-`app.<zone>` serves `public/`: one page, plain ES module, uPlot for charts,
+`app.<zone>` serves `src/web/static/`: one page, plain ES module, uPlot for charts,
 no build step. It shows whether the game answered just now (`/api/status`
 calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
 reaches the tunnel), then tabs for power per circuit group, item production

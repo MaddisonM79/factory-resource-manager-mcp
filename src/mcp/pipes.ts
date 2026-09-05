@@ -3,7 +3,7 @@
 // it snapped visually but never joined the fluid network. That is the failure mode of
 // mod-placed junction connectors, and it is invisible until a bank starves.
 
-import { asArray, num, pt, inBox, loc, type Pt } from "./frm.ts";
+import { asArray, num, pt, inBox, loc, type Pt } from "../frm/client.ts";
 
 export type EndKind = "junction" | "pump" | "machine" | "open";
 
