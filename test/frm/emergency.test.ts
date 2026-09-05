@@ -25,9 +25,9 @@ test("a held-back, full reserve with no tie built yet is still ready", () => {
   assert.deepEqual(r.sites[0].notes, ["no *-TIE switch for this site yet"]);
 });
 
-test("a held-back, full reserve with a closed tie is ready and in normal mode", () => {
+test("a held-back, full reserve with an open tie is ready and in normal mode", () => {
   const reserve = group(1, [26], { BatteryPercent: 99.96, BatteryCapacity: 8000 });
-  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 3, 26), sw("COAST-TIE", true, 3, 5)], [GRID, reserve, group(0, [5])]);
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 3, 26), sw("COAST-TIE", false, 3, 5)], [GRID, reserve, group(0, [5])]);
   assert.equal(r.mode, "normal");
   assert.equal(r.ready, true);
   assert.equal(r.mainGroup, 2);
@@ -39,9 +39,9 @@ test("a held-back, full reserve with a closed tie is ready and in normal mode", 
   assert.deepEqual(s.issues, []);
 });
 
-test("issues: closed reserve, low battery, discharging, missing tie, open tie", () => {
+test("issues: closed reserve, low battery, discharging, missing tie, closed tie", () => {
   const low = group(1, [26], { BatteryPercent: 40, BatteryCapacity: 8000, BatteryOutput: 120, BatteryTimeEmpty: "01:30:00", PowerConsumed: 120 });
-  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 3, 26), sw("EAST-EMERGENCY-RESERVE", true, 3, 3), sw("EAST-TIE", false, 3, 9)], [GRID, low, group(0, [9])]);
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 3, 26), sw("EAST-EMERGENCY-RESERVE", true, 3, 3), sw("EAST-TIE", true, 3, 9)], [GRID, low, group(0, [9])]);
   assert.equal(r.ready, false);
   const coast = r.sites.find((s) => s.site === "COAST")!;
   assert.ok(coast.issues.some((i) => i.includes("below 95%")), coast.issues.join(" | "));
@@ -52,14 +52,27 @@ test("issues: closed reserve, low battery, discharging, missing tie, open tie", 
   assert.equal(east.reserve?.isOn, true);
   assert.equal(east.reserve?.reserve, null, "closed switch: both sides are one group, nothing behind it");
   assert.ok(east.reserve?.issues.some((i) => i.includes("bridged")));
-  assert.ok(east.tie?.issues.some((i) => i.includes("cut off")));
-  assert.equal(r.mode, "mixed", "one tie open and one reserve closed, but not all of them");
+  assert.ok(east.tie?.issues.some((i) => i.includes("bridged")));
+  assert.equal(r.mode, "mixed", "one reserve closed, one open");
 });
 
-test("dark-restart mode: every tie open and every reserve closed", () => {
+test("dark-restart mode: every reserve closed", () => {
   const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", true, 3, 26), sw("COAST-TIE", false, 3, 5)], [GRID, group(1, [26], { BatteryCapacity: 8000, BatteryPercent: 80 }), group(0, [5])]);
   assert.equal(r.mode, "dark-restart");
   assert.equal(r.ready, false);
+});
+
+test("a closed tie in normal mode is an issue and blocks readiness", () => {
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 3, 26), sw("COAST-TIE", true, 3, 5)], [GRID, group(1, [26], { BatteryCapacity: 8000, BatteryPercent: 100 }), group(0, [5])]);
+  assert.equal(r.mode, "normal");
+  assert.equal(r.ready, false);
+  assert.ok(r.sites[0].issues.some((i) => i.includes("tie is closed")));
+});
+
+test("a side with no cable (circuit -1) is a note, not an issue", () => {
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 0, 26), sw("COAST-TIE", false, -1, 0)], [GRID, group(1, [26], { BatteryCapacity: 8000, BatteryPercent: 100 }), group(0, [0])]);
+  assert.equal(r.ready, true);
+  assert.deepEqual(r.sites[0].notes, ["nothing wired to the primary side yet"]);
 });
 
 test("no matching switches: mode none, others listed", () => {

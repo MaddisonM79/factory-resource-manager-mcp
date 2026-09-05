@@ -504,14 +504,14 @@ async function tabSinks(main) {
 
 async function tabEmergency(main) {
   const r = await api("/api/emergency");
-  const modeText = { normal: "Normal: reserves held back, ties closed", "dark-restart": "Dark restart in progress: ties open, reserves closed", mixed: "Mixed: some switches are not in their normal position", none: "No *-EMERGENCY-RESERVE or *-TIE switches found" }[r.mode] ?? r.mode;
+  const modeText = { normal: "Normal: reserves held back", "dark-restart": "Dark restart in progress: reserves closed", mixed: "Mixed: some reserves closed, some open", none: "No *-EMERGENCY-RESERVE or *-TIE switches found" }[r.mode] ?? r.mode;
   const banner = el("div", { class: "banner " + (r.ready ? "ok" : r.mode === "none" ? "" : "bad") },
     el("div", { class: "banner-word", text: r.ready ? "Ready" : r.mode === "none" ? "Not configured" : "Not ready" }),
     el("div", { class: "banner-sub", text: `${modeText} · threshold ${r.minChargePct}% · main grid is circuit group ${r.mainGroup ?? "?"}` }));
   main.append(banner);
   if (!r.switches.length) {
     main.append(el("div", { class: "card" }, el("h2", {}, "How to set it up"),
-      el("p", { class: "muted", text: "Name a power switch <SITE>-EMERGENCY-RESERVE to mark the switch that gates a battery bank, and <SITE>-TIE for the site's cut-off from the main grid. This tab pairs them by site." }),
+      el("p", { class: "muted", text: "Name a power switch <SITE>-EMERGENCY-RESERVE to mark the switch that gates a battery bank, and <SITE>-TIE for the site's cut-off from the main grid. Both are open in normal operation. This tab pairs them by site." }),
       r.otherSwitches.length ? el("p", { class: "muted small", text: `Other switches: ${r.otherSwitches.map((s) => `${s.name} (${s.isOn ? "closed" : "open"})`).join(", ")}` }) : null));
     return;
   }
