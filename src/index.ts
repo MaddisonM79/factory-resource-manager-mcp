@@ -21,7 +21,9 @@ import {
   round,
   takeSample,
   appendSample,
+  gapSample,
   windowOf,
+  type TrendWindow,
   minutesBetween,
   iso,
   type Sample,
@@ -562,6 +564,14 @@ function buildServer(env: Env): McpServer {
       }),
   );
 
+  const history = (w: TrendWindow, now: number) => ({
+    samplesUsed: w.samples.length,
+    spanMinutes: w.samples.length ? round(minutesBetween(w.samples[0].t, now)) : 0,
+    oldestUsable: w.samples.length ? iso(w.samples[0].t) : null,
+    truncatedBy: w.truncatedBy,
+    truncatedAt: w.truncatedAt ? iso(w.truncatedAt) : null,
+  });
+
   const sinkView = (s: any, then: { total: number; t: number } | null, now: number) => {
     if (!s) return null;
     const total = num(s.TotalPoints), toCoupon = num(s.PointsToCoupon);
@@ -602,8 +612,8 @@ function buildServer(env: Env): McpServer {
           item ? frmGet(env, "getSinkList") : Promise.resolve([]),
         ]);
         const ring = await appendSample(env, sample);
-        const win = windowOf(ring, window_minutes, sample.t);
-        const oldest = (k: "sink" | "xsink") => { const o = win.find((x) => x[k]); return o && o[k] ? { total: o[k]!.total, t: o.t } : null; };
+        const w = windowOf(ring, window_minutes, sample.t);
+        const oldest = (k: "sink" | "xsink") => { const o = w.samples.find((x) => x[k]); return o && o[k] ? { total: o[k]!.total, t: o.t } : null; };
         return {
           resourceSink: sinkView(asArray(sinkRaw)[0], oldest("sink"), sample.t),
           explorationSink: sinkView(asArray(xsinkRaw)[0], oldest("xsink"), sample.t),
@@ -611,7 +621,7 @@ function buildServer(env: Env): McpServer {
           pointValues: item
             ? asArray(sinkList).filter((x) => String(x.Name ?? "").toLowerCase().includes(item.toLowerCase())).slice(0, limit).map((x) => ({ item: x.Name, points: num(x.Points) }))
             : undefined,
-          samplesInWindow: win.length,
+          history: history(w, sample.t),
         };
       }),
   );
@@ -620,7 +630,7 @@ function buildServer(env: Env): McpServer {
     "depot_status",
     {
       description:
-        "Dimensional Depot per item: stock, stack size, capacity (stack × depot stack multiplier, inferred from the fullest items), full or not, fill rate per minute " +
+        "Dimensional Depot per item: stock, stack size, capacity (stack × depot expansion multiplier from M.A.M. research, inferred from the fullest items if research is unreadable), full or not, fill rate per minute " +
         "from the sampler history over window_minutes, minutes to full, and the time it filled if that happened inside the window. Answers 'what filled first'.",
       inputSchema: z.object({
         item: z.string().optional().describe("substring on item name"),
@@ -632,11 +642,19 @@ function buildServer(env: Env): McpServer {
     },
     async ({ item, only_full, window_minutes, sort, limit }) =>
       guard(async () => {
-        const [sample, cloud] = await Promise.all([takeSample(env), frmGet(env, "getCloudInv")]);
+        const [sample, cloud, schematics] = await Promise.all([takeSample(env), frmGet(env, "getCloudInv"), frmGet(env, "getSchematics").catch(() => null)]);
         const ring = await appendSample(env, sample);
-        const win = windowOf(ring, window_minutes, sample.t).filter((x) => x.cloud);
+        const w = windowOf(ring, window_minutes, sample.t);
+        const win = w.samples.filter((x) => x.cloud);
         const items = asArray(cloud);
-        const mult = Math.max(1, ...items.map((i) => (num(i.MaxAmount) ? Math.ceil(num(i.Amount) / num(i.MaxAmount)) : 1)));
+        // "Depot Expansion (400%)" purchased => capacity is 4 stacks. Fall back to inferring from the fullest items.
+        const researched = asArray(schematics)
+          .filter((r) => r.Purchased && /Depot Expansion \((\d+)%\)/.test(String(r.Name)))
+          .map((r) => num(String(r.Name).match(/(\d+)%/)![1]) / 100);
+        const multSource = researched.length ? "research" : "inferred";
+        const mult = researched.length
+          ? Math.max(...researched)
+          : Math.max(1, ...items.map((i) => (num(i.MaxAmount) ? Math.ceil(num(i.Amount) / num(i.MaxAmount)) : 1)));
         const oldest = win[0];
         const rows = items
           .filter((i) => !item || String(i.Name ?? "").toLowerCase().includes(item.toLowerCase()))
@@ -655,8 +673,17 @@ function buildServer(env: Env): McpServer {
             };
           })
           .filter((r) => !only_full || r.full)
-          .sort((a, b) => sort === "name" ? a.item.localeCompare(b.item) : sort === "rate" ? (b.ratePerMin ?? -1e9) - (a.ratePerMin ?? -1e9) : (b.pct ?? 0) - (a.pct ?? 0) || a.item.localeCompare(b.item));
-        return { items: rows.length, full: rows.filter((r) => r.full).length, depotStackMultiplier: mult, trendMinutes: round(oldest ? minutesBetween(oldest.t, sample.t) : 0), samplesInWindow: win.length, rows: rows.slice(0, limit) };
+          .sort((a, b) =>
+            sort === "name" ? a.item.localeCompare(b.item)
+            : sort === "rate" ? Math.abs(b.ratePerMin ?? 0) - Math.abs(a.ratePerMin ?? 0) || (b.pct ?? 0) - (a.pct ?? 0) || a.item.localeCompare(b.item)
+            : (b.pct ?? 0) - (a.pct ?? 0) || a.item.localeCompare(b.item));
+        const changed = oldest ? items.filter((i) => (oldest.cloud?.[String(i.Name)] ?? num(i.Amount)) !== num(i.Amount)).length : null;
+        return {
+          items: rows.length, full: rows.filter((r) => r.full).length,
+          depotStackMultiplier: mult, multiplierSource: multSource,
+          history: { ...history(w, sample.t), itemsChangedInWindow: changed },
+          rows: rows.slice(0, limit),
+        };
       }),
   );
 
@@ -665,7 +692,8 @@ function buildServer(env: Env): McpServer {
     {
       description:
         "Battery and power trend per circuit group over window_minutes, from the sampler history (cron every 5 min plus every call to a trend tool): " +
-        "battery % now vs window start, %/min, projected minutes to empty or full at that rate, min/max in window, and production/consumption deltas. A trend, not a snapshot.",
+        "battery % now vs window start, %/min, projected minutes to empty or full at that rate, min/max in window, and production/consumption deltas. A trend, not a snapshot. " +
+        "Group numbers are renumbered when you rewire, so history is matched by member circuit IDs; matchedBy tells you how, and 'none' means the grid is new since the window started.",
       inputSchema: z.object({
         window_minutes: z.number().min(5).max(1440).default(30),
         circuit_group: z.number().int().optional(),
@@ -675,33 +703,47 @@ function buildServer(env: Env): McpServer {
       guard(async () => {
         const sample = await takeSample(env);
         const ring = await appendSample(env, sample);
-        const win = windowOf(ring, window_minutes, sample.t);
+        const w = windowOf(ring, window_minutes, sample.t);
+        const win = w.samples;
         const first = win[0] ?? sample;
         const spanMin = minutesBetween(first.t, sample.t);
         const rows = sample.power
           .filter((c) => circuit_group == null || c.g === circuit_group)
           .map((c) => {
-            const then = first.power.find((x) => x.g === c.g) ?? c;
-            const hist = win.map((s) => s.power.find((x) => x.g === c.g)).filter((x): x is Sample["power"][number] => !!x);
-            const dPct = c.bpct - then.bpct;
-            const rate = spanMin > 0 ? dPct / spanMin : 0;
+            // Match by overlapping circuit IDs (stable across rewiring); fall back to group number for old samples without ids.
+            const overlap = (x: Sample["power"][number]) => x.ids?.length && c.ids?.length ? x.ids.filter((i) => c.ids.includes(i)).length : 0;
+            const pick = (ps: Sample["power"]) => {
+              const best = ps.map((x) => ({ x, n: overlap(x) })).filter((o) => o.n > 0).sort((a, b) => b.n - a.n)[0];
+              if (best) return { x: best.x, by: "circuits" as const };
+              // Old samples have no ids: accept the same group number only if the battery capacity also matches.
+              const byG = ps.find((x) => x.g === c.g && !x.ids?.length && x.bcap === c.bcap);
+              return byG ? { x: byG, by: "group" as const } : null;
+            };
+            const m0 = pick(first.power);
+            const matchedBy: "circuits" | "group" | "none" = m0?.by ?? "none";
+            const then = m0?.x ?? null;
+            const hist = win.map((s) => pick(s.power)?.x).filter((x): x is Sample["power"][number] => !!x);
+            const dPct = then ? c.bpct - then.bpct : null;
+            const rate = then && spanMin > 0 ? (dPct as number) / spanMin : null;
             return {
               circuitGroup: c.g,
+              circuits: c.ids,
+              matchedBy,
               hasBattery: c.bcap > 0,
               now: { batteryPct: round(c.bpct), capacityMWh: c.bcap, inMW: round(c.bin), outMW: round(c.bout), productionMW: round(c.prod), consumptionMW: round(c.cons), capacityMW: round(c.cap), fuseTripped: c.fuse },
-              windowStart: { batteryPct: round(then.bpct), productionMW: round(then.prod), consumptionMW: round(then.cons), at: iso(first.t) },
-              deltaPct: round(dPct),
-              pctPerMin: round(rate, 3),
-              minutesToEmpty: rate < 0 ? Math.round(c.bpct / -rate) : null,
-              minutesToFull: rate > 0 ? Math.round((100 - c.bpct) / rate) : null,
+              windowStart: then ? { batteryPct: round(then.bpct), productionMW: round(then.prod), consumptionMW: round(then.cons), at: iso(first.t) } : null,
+              deltaPct: dPct == null ? null : round(dPct),
+              pctPerMin: rate == null ? null : round(rate, 3),
+              minutesToEmpty: rate != null && rate < 0 ? Math.round(c.bpct / -rate) : null,
+              minutesToFull: rate != null && rate > 0 ? Math.round((100 - c.bpct) / rate) : null,
               minPct: hist.length ? round(Math.min(...hist.map((h) => h.bpct))) : null,
               maxPct: hist.length ? round(Math.max(...hist.map((h) => h.bpct))) : null,
-              deltaProductionMW: round(c.prod - then.prod),
-              deltaConsumptionMW: round(c.cons - then.cons),
+              deltaProductionMW: then ? round(c.prod - then.prod) : null,
+              deltaConsumptionMW: then ? round(c.cons - then.cons) : null,
               fuseTrippedInWindow: hist.some((h) => h.fuse),
             };
           });
-        return { windowMinutes: window_minutes, spanMinutes: round(spanMin), samplesInWindow: win.length, oldestSample: ring[0] ? iso(ring[0].t) : null, rows };
+        return { windowMinutes: window_minutes, history: history(w, sample.t), rows };
       }),
   );
 
@@ -821,7 +863,8 @@ export default {
           try {
             await appendSample(env, await takeSample(env));
           } catch (e: any) {
-            console.warn("sample skipped:", e?.message ?? e);
+            console.warn("origin down, writing gap sample:", e?.message ?? e);
+            await appendSample(env, gapSample());
           }
         } else {
           const r = await provider.purgeExpiredData(env);

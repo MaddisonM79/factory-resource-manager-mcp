@@ -202,12 +202,20 @@ export const round = (v: number, d = 1) => Math.round(v * 10 ** d) / 10 ** d;
 // Written by the cron trigger (every 5 min) and by every trend tool call.
 
 export interface PowerSample {
-  g: number; cap: number; prod: number; cons: number; max: number;
+  g: number;
+  /** member circuit IDs; more stable than the group number, which is renumbered on rewiring */
+  ids: number[];
+  cap: number; prod: number; cons: number; max: number;
   bcap: number; bpct: number; bin: number; bout: number; fuse: boolean;
 }
 export interface SinkSample { total: number; toCoupon: number; coupons: number; pct: number }
+export interface SessionStamp { name: string; play: number }
 export interface Sample {
   t: number;
+  /** true when the origin was unreachable at sample time; no data fields are trusted */
+  gap?: true;
+  /** session name + total play seconds, so a save reload can be detected */
+  session?: SessionStamp;
   power: PowerSample[];
   cloud: Record<string, number> | null;
   sink: SinkSample | null;
@@ -223,19 +231,23 @@ const sinkOf = (s: any): SinkSample | null =>
 
 /** Fetch one snapshot. Throws if getPower fails (origin down); other parts are best-effort. */
 export async function takeSample(env: Env): Promise<Sample> {
-  const [power, cloud, sink, xsink] = await Promise.all([
+  const [power, cloud, sink, xsink, session] = await Promise.all([
     frmGet(env, "getPower"),
     frmGet(env, "getCloudInv").catch(() => null),
     frmGet(env, "getResourceSink").catch(() => null),
     frmGet(env, "getExplorationSink").catch(() => null),
+    frmGet(env, "getSessionInfo").catch(() => null),
   ]);
   const cloudMap: Record<string, number> | null = cloud
     ? Object.fromEntries(asArray(cloud).map((i: any) => [String(i.Name), num(i.Amount)]))
     : null;
+  const sess: any = asArray(session)[0];
   return {
     t: Date.now(),
+    session: sess ? { name: String(sess.SessionName ?? ""), play: num(sess.TotalPlayDuration) } : undefined,
     power: asArray(power).map((c: any) => ({
       g: num(c.CircuitGroupID ?? c.CircuitID),
+      ids: asArray(c.AssociatedCircuits).map(num).sort((a, b) => a - b),
       cap: num(c.PowerCapacity), prod: num(c.PowerProduction), cons: num(c.PowerConsumed), max: num(c.PowerMaxConsumed),
       bcap: num(c.BatteryCapacity), bpct: num(c.BatteryPercent), bin: num(c.BatteryInput), bout: num(c.BatteryOutput),
       fuse: !!c.FuseTriggered,
@@ -245,6 +257,9 @@ export async function takeSample(env: Env): Promise<Sample> {
     xsink: sinkOf(asArray(xsink)[0]),
   };
 }
+
+/** A marker written when the origin was unreachable, so trends never span a downtime hole. */
+export const gapSample = (): Sample => ({ t: Date.now(), gap: true, power: [], cloud: null, sink: null, xsink: null });
 
 export async function readSamples(env: Env): Promise<Sample[]> {
   const raw = await env.OAUTH_KV.get(RING_KEY, "json").catch(() => null);
@@ -261,9 +276,38 @@ export async function appendSample(env: Env, s: Sample): Promise<Sample[]> {
   return ring;
 }
 
-export function windowOf(ring: Sample[], minutes: number, now: number): Sample[] {
+export type TrendCut = "gap" | "session-change" | "save-reload" | null;
+export interface TrendWindow {
+  /** usable samples, oldest first, ending with the newest */
+  samples: Sample[];
+  /** why history older than samples[0] was discarded, if it was */
+  truncatedBy: TrendCut;
+  truncatedAt: number | null;
+}
+
+/**
+ * The usable history for a trend: the contiguous run of good samples ending at
+ * the newest one, cut at any downtime gap, session-name change, or play-time
+ * regression (an older save was loaded), then limited to the window.
+ */
+export function windowOf(ring: Sample[], minutes: number, now: number): TrendWindow {
+  const sorted = [...ring].sort((a, b) => a.t - b.t);
   const cutoff = now - minutes * 60_000;
-  return ring.filter((x) => x.t >= cutoff).sort((a, b) => a.t - b.t);
+  const out: Sample[] = [];
+  let truncatedBy: TrendCut = null, truncatedAt: number | null = null;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const s = sorted[i], newer = out[0];
+    let cut: TrendCut = null;
+    if (s.gap) cut = "gap";
+    else if (newer?.session && s.session) {
+      if (s.session.name !== newer.session.name) cut = "session-change";
+      else if (s.session.play > newer.session.play + 1) cut = "save-reload";
+    }
+    if (cut) { truncatedBy = cut; truncatedAt = s.t; break; }
+    if (s.t < cutoff) break;
+    out.unshift(s);
+  }
+  return { samples: out, truncatedBy, truncatedAt };
 }
 
 export const minutesBetween = (a: number, b: number) => Math.abs(b - a) / 60_000;
