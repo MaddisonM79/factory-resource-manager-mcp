@@ -16,6 +16,16 @@ export interface Env {
   OAUTH_PROVIDER: OAuthHelpers;
   /** history: raw 5-minute samples + hourly aggregates (see migrations/) */
   DB: D1Database;
+  /** comma-separated hostnames the MCP handler accepts (DNS-rebinding guard) */
+  MCP_HOSTS: string;
+  /** the dashboard hostname; requests to it never touch the OAuth provider */
+  DASH_HOST: string;
+  /** Hanko project API, e.g. https://auth.example.com; its JWKS signs the session cookie */
+  HANKO_API_URL: string;
+  /** comma-separated emails allowed on the dashboard; a valid Hanko session for anyone else is a 403 */
+  DASH_ALLOWED_EMAILS: string;
+  /** static dashboard files (public/) */
+  ASSETS: Fetcher;
 }
 
 export const READ_ENDPOINTS = [

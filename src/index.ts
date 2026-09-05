@@ -30,7 +30,8 @@ import {
 import { cluster, classifyMachine, circuitMap, type MachineState } from "./history";
 import { api, querySeries } from "./api";
 import { runTick, runRollup } from "./sampler";
-import type { Series } from "./store";
+import { thinSeries } from "./store";
+import { dash } from "./dash";
 
 type Props = { user: string };
 
@@ -804,11 +805,8 @@ function buildServer(env: Env): McpServer {
         const t = to ?? now, f = from ?? t - 24 * 3600;
         if (f > t) throw new Error("from must be <= to");
         const out = await querySeries(env, { kind: series, key, from: f, to: t, res }, now);
-        const thin = (s: Series) => {
-          if (s.points.length <= max_points) return s;
-          const step = s.points.length / max_points;
-          return { ...s, thinned_from: s.points.length, points: Array.from({ length: max_points }, (_, i) => s.points[Math.floor(i * step)]) };
-        };
+        // Per series key (circuit group, site, field, item, platform, sink): thinning the flat list drops whole keys.
+        const thin = (s: Parameters<typeof thinSeries>[1]) => thinSeries(series, s, max_points);
         return Array.isArray(out) ? out.map(thin) : thin(out);
       }),
   );
@@ -903,7 +901,7 @@ const mcp = {
   fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const handler = createMcpHandler(() => buildServer(env), {
       route: "/mcp",
-      allowedHostnames: ["frm-mcp.lmam.tech", "localhost", "127.0.0.1"],
+      allowedHostnames: [...env.MCP_HOSTS.split(",").map((h) => h.trim()).filter(Boolean), "localhost", "127.0.0.1"],
       authContext: { props: ((ctx as any).props as Props | undefined) ?? {} },
       onerror: (e) => console.error("mcp:", e),
     });
@@ -925,7 +923,10 @@ const provider = new OAuthProvider({
 });
 
 export default {
-  fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
+  // The dashboard host is a separate app: Hanko session cookie, static assets, the same read API.
+  // Every other host (the MCP host, and the old one until it is removed) goes through the OAuth provider.
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) =>
+    new URL(request.url).hostname === env.DASH_HOST ? dash.fetch(request, env, ctx) : provider.fetch(request, env, ctx),
   // */5: sample into the KV ring and D1 (one batch). Daily: purge expired OAuth data, then roll up history.
   scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => {
     ctx.waitUntil(

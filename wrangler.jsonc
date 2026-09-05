@@ -5,8 +5,18 @@
   "account_id": "baf35e5e36c3958940832d43b07e466a",
   "compatibility_date": "2026-09-01",
   "compatibility_flags": ["nodejs_compat"],
-  "routes": [{ "pattern": "frm-mcp.lmam.tech", "custom_domain": true }],
+  // One Worker, two hostnames: the MCP server + OAuth on `mcp`, the dashboard on `app`.
+  // Custom Domains get their own edge certificate, so deep subdomains are fine here.
+  "routes": [
+    { "pattern": "mcp.frm.hosted.lmam.tech", "custom_domain": true },
+    { "pattern": "app.frm.hosted.lmam.tech", "custom_domain": true },
+    // Old MCP hostname, kept until the claude.ai connector is re-added on the new one.
+    { "pattern": "frm-mcp.lmam.tech", "custom_domain": true }
+  ],
   "observability": { "enabled": true },
+  // Dashboard static files. run_worker_first so the host switch in src/index.ts sees every request;
+  // the dashboard host serves them through the ASSETS binding.
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   // Sampler: every 5 min snapshot into the KV ring (live view) and D1 (history).
   // Daily: purge expired OAuth grants/tokens, then roll raw samples older than 7 days into hourly rows.
   "triggers": { "crons": ["*/5 * * * *", "17 4 * * *"] },
@@ -19,8 +29,14 @@
     { "binding": "DB", "database_name": "frm-history", "database_id": "490f5c59-4d89-41b8-beb5-8905907a4c73", "migrations_dir": "migrations" }
   ],
   "vars": {
-    "FRM_BASE_URL": "https://frm.lmam.tech",
-    "FRM_ALLOW_WRITE": "false"
+    // FRM behind a Cloudflare Tunnel + Access service auth. A first-level name: the tunnel's
+    // CNAME relies on Universal SSL, which does not cover deeper subdomains.
+    "FRM_BASE_URL": "https://frm-cft.lmam.tech",
+    "FRM_ALLOW_WRITE": "false",
+    "MCP_HOSTS": "mcp.frm.hosted.lmam.tech,frm-mcp.lmam.tech",
+    "DASH_HOST": "app.frm.hosted.lmam.tech",
+    "HANKO_API_URL": "https://auth.lmam.tech",
+    "DASH_ALLOWED_EMAILS": "nerdy.maddison@gmail.com"
   }
   // Secrets (wrangler secret put):
   //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access)

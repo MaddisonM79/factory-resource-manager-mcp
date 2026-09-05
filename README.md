@@ -9,8 +9,10 @@ Ask "what's asleep?", "why is caterium short?", "which depot filled first?",
 "is the battery draining?" and get answers computed from live game data.
 
 It runs as a single Cloudflare Worker: stateless MCP over Streamable HTTP,
-OAuth in front of it so claude.ai can add it as a custom connector, and a
-cron sampler so a few tools can report trends instead of snapshots.
+OAuth in front of it so claude.ai can add it as a custom connector, a cron
+sampler that writes 5-minute history to D1 so tools can report trends instead
+of snapshots, and a small dashboard on a second hostname that charts that
+history and says whether the game is up.
 
 ## How it fits together
 
@@ -132,6 +134,8 @@ default the last 24 h) and optional `res=raw|hourly`; when omitted, raw for
 windows of ≤ 7 days inside raw retention, hourly otherwise.
 
 ```
+GET /api/status                        live getSessionInfo + getPlayer, plus sampler staleness
+GET /api/latest                        newest tick from every table, sites/fields resolved to names
 GET /api/live                          KV ring + staleness_seconds (?minutes=)
 GET /api/series/power                  ?group= for one circuit group
 GET /api/series/site/:id               one site;  /api/series/site = every cluster, resolved
@@ -150,15 +154,39 @@ when the window spans epochs you get an array of them. Hourly points add
 `sample_count` and `gap_count`; treat `gap_count > 0` as low confidence.
 Nothing under `/api` can reach the FRM tunnel.
 
+## Dashboard
+
+`app.<zone>` serves `public/`: one page, plain ES module, uPlot for charts,
+no build step. It shows whether the game answered just now (`/api/status`
+calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
+reaches the tunnel), then tabs for power per circuit group, item production
+vs consumption, sites by machine state, generator fields, the depot, and the
+sinks. Every chart takes the same time range (1 h to 30 d) and a Local / UTC
+toggle in the header; outages are shaded, save reloads are marked with the
+session name, and nothing is interpolated across either. Tables come from
+`/api/latest`, the newest tick from every history table with sites and
+fields resolved to their lookup names.
+
+Sign-in is [Hanko](https://hanko.io): the login element stores its JWT in a
+first-party `hanko` cookie, the Worker verifies it against the project's JWKS
+(`jose`) and then checks the email claim against `DASH_ALLOWED_EMAILS`. A
+valid Hanko session for anyone else is a 403, so turning registration off in
+the Hanko project is belt and braces, not the only lock. `MCP_HOSTS` and
+`DASH_HOST` in `wrangler.jsonc` decide which hostname gets which app; the
+dashboard host never touches the OAuth provider.
+
 ## Deploying your own
 
 You need: a Cloudflare account with a zone, Satisfactory with FRM installed,
 and `cloudflared` on the game machine.
 
 1. **Tunnel.** Create a Cloudflare Tunnel on the game machine that publishes
-   `localhost:8080` to a hostname on your zone, e.g. `frm.example.com`. In
-   FRM's `WebServer.cfg` set `Web_Autostart: true` so the server comes up with
-   the save.
+   `localhost:8080` to a hostname on your zone, e.g. `frm.example.com`. Keep
+   it a first-level subdomain: the tunnel's CNAME relies on Universal SSL,
+   which does not cover `a.b.example.com` (Worker custom domains get their
+   own certificate, so the `mcp.` and `app.` names can be as deep as you
+   like). In FRM's `WebServer.cfg` set `Web_Autostart: true` so the server
+   comes up with the save.
 2. **Access.** In Zero Trust, create a service token, then a self-hosted
    Access application for that hostname with one policy: action
    **Service Auth**, include **Service Token = your token**. Verify with curl
@@ -188,7 +216,7 @@ and `cloudflared` on the game machine.
    terminal: `op read 'op://Vault/item/field' | npx wrangler secret put NAME`.
 
 4. **Connect.** In claude.ai, Settings → Connectors → Add custom connector
-   → `https://<your-worker-host>/mcp`. It redirects to the passphrase page;
+   → `https://<your-mcp-host>/mcp`. It redirects to the passphrase page;
    enter it once and you're done. Dynamic client registration handles the
    rest, no client id or secret to copy.
 
