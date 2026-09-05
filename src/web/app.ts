@@ -1,4 +1,4 @@
-// The dashboard host. Static files from public/ plus the read API, gated by a Hanko
+// The dashboard host. Static files from static/ plus the read API, gated by a Hanko
 // session: the Hanko frontend SDK stores its JWT in a first-party `hanko` cookie, and
 // this verifies it against the project's JWKS and an email allow-list. The MCP host
 // and its OAuth flow never see any of this.
