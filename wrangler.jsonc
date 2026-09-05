@@ -16,7 +16,7 @@
   // History. Create with `npx wrangler d1 create frm-history`, put the id here,
   // then `npx wrangler d1 migrations apply frm-history --remote`.
   "d1_databases": [
-    { "binding": "DB", "database_name": "frm-history", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "frm-history", "database_id": "490f5c59-4d89-41b8-beb5-8905907a4c73", "migrations_dir": "migrations" }
   ],
   "vars": {
     "FRM_BASE_URL": "https://frm.lmam.tech",
