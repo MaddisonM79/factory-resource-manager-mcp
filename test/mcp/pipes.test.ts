@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pipeReport, pipeTier, pipeCapM3PerMin } from "../src/pipes.ts";
+import { pipeReport, pipeTier, pipeCapM3PerMin } from "../../src/mcp/pipes.ts";
 
 const box = (x: number, y: number, z: number, half = 120) => ({ min: { x: x - half, y: y - half, z: z - 75 }, max: { x: x + half, y: y + half, z: z + 75 } });
 const pipe = (id: string, cls: string, a: [number, number, number], b: [number, number, number], c0: boolean, c1: boolean) => ({

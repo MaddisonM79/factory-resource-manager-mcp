@@ -14,7 +14,7 @@
   "observability": { "enabled": true },
   // Dashboard static files. run_worker_first so the host switch in src/index.ts sees every request;
   // the dashboard host serves them through the ASSETS binding.
-  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
+  "assets": { "directory": "./src/web/static", "binding": "ASSETS", "run_worker_first": true },
   // Sampler: every 5 min snapshot into the KV ring (live view) and D1 (history).
   // Daily: purge expired OAuth grants/tokens, then roll raw samples older than 7 days into hourly rows.
   "triggers": { "crons": ["*/5 * * * *", "17 4 * * *"] },

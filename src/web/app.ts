@@ -6,8 +6,8 @@
 import { Hono } from "hono";
 import { getCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type JWTPayload } from "jose";
-import type { Env } from "./frm.ts";
-import { api, apiError } from "./api.ts";
+import type { Env } from "../frm/client.ts";
+import { api, apiError } from "../api/routes.ts";
 
 export const SESSION_COOKIE = "hanko";
 

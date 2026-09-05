@@ -3,9 +3,9 @@ import assert from "node:assert/strict";
 import {
   nextEpoch, cluster, resolveCenter, stepVisits, coalesceGaps, pickRes, buildTick, gapState, initialState,
   siteRows, genRows, RAW_RETENTION_SECONDS, HOUR,
-} from "../src/history.ts";
-import { fuelTypeOf, isFueled, fuelAmount, genCapacityMw } from "../src/history.ts";
-import { snapshot, machine, generator, station, train, sink, M } from "./fixtures.ts";
+} from "../../src/history/history.ts";
+import { fuelTypeOf, isFueled, fuelAmount, genCapacityMw } from "../../src/history/history.ts";
+import { snapshot, machine, generator, station, train, sink, M } from "../fixtures.ts";
 
 test("epoch: first sample is epoch 1, then bumps on session change or playtime regression", () => {
   assert.deepEqual(nextEpoch(null, { session: "A", playtime: 10 }), { epoch: 1, bumped: true });

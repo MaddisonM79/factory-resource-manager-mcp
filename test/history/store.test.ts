@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { d1 } from "./d1.ts";
-import { snapshot, station, train, sink, machine, M } from "./fixtures.ts";
-import { buildTick, gapState, initialState, HOUR, RAW_RETENTION_SECONDS, type HistoryState } from "../src/history.ts";
-import { writeTick, writeGap, rollup, readSeries, readVisits, listLookup, updateLookup, rollupCutoff } from "../src/store.ts";
+import { d1 } from "../d1.ts";
+import { snapshot, station, train, sink, machine, M } from "../fixtures.ts";
+import { buildTick, gapState, initialState, HOUR, RAW_RETENTION_SECONDS, type HistoryState } from "../../src/history/history.ts";
+import { writeTick, writeGap, rollup, readSeries, readVisits, listLookup, updateLookup, rollupCutoff } from "../../src/history/store.ts";
 
 const T0 = 1_700_000_000;
 

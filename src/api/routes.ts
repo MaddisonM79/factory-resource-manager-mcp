@@ -5,9 +5,9 @@
 // from a live answer rather than from sampler staleness.
 
 import { Hono } from "hono";
-import { type Env, readSamples, frmGet, asArray, loc } from "./frm.ts";
-import { RAW_RETENTION_SECONDS, pickRes, type Res } from "./history.ts";
-import { readSeries, readVisits, readLatest, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "./store.ts";
+import { type Env, readSamples, frmGet, asArray, loc } from "../frm/client.ts";
+import { RAW_RETENTION_SECONDS, pickRes, type Res } from "../history/history.ts";
+import { readSeries, readVisits, readLatest, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
 
 export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
 

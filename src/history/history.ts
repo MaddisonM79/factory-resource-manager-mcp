@@ -1,7 +1,7 @@
 // Historical storage: pure logic for turning FRM snapshots into D1 rows.
 // No I/O here; src/store.ts does the SQL and src/frm.ts does the fetching.
 
-import { asArray, num, pt, type Pt } from "./frm.ts";
+import { asArray, num, pt, type Pt } from "../frm/client.ts";
 
 export const TICK_SECONDS = 300;
 export const HOUR = 3600;

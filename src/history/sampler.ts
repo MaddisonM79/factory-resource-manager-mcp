@@ -1,7 +1,7 @@
 // The 5-minute tick: KV ring as before, plus one D1 batch. State between ticks lives in KV
 // so the sampler never reads D1.
 
-import { type Env, fetchSnapshot, toSample, appendSample, gapSample } from "./frm.ts";
+import { type Env, fetchSnapshot, toSample, appendSample, gapSample } from "../frm/client.ts";
 import { type HistoryState, type Snapshot, buildTick, gapState, initialState } from "./history.ts";
 import { writeTick, writeGap, rollup } from "./store.ts";
 
