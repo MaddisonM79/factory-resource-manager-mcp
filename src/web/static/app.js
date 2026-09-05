@@ -6,7 +6,7 @@ import { register } from "/vendor/hanko-elements.js";
 // ---------------------------------------------------------------- state
 
 const RANGES = [["1h", 3600], ["6h", 6 * 3600], ["24h", 24 * 3600], ["7d", 7 * 86400], ["30d", 30 * 86400]];
-const TABS = [["overview", "Overview"], ["power", "Power"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
+const TABS = [["overview", "Overview"], ["power", "Power"], ["emergency", "Emergency"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
 const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
 const STATES = ["running", "blocked", "starved", "unpowered", "paused", "unconfigured", "idle"];
 
@@ -500,7 +500,66 @@ async function tabSinks(main) {
   a.card.append(el("div", { class: "chart-note", text: resNote(pv) }));
 }
 
-const RENDER = { overview: tabOverview, power: tabPower, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
+// ---------------------------------------------------------------- emergency
+
+async function tabEmergency(main) {
+  const r = await api("/api/emergency");
+  const modeText = { normal: "Normal: reserves held back, ties closed", "dark-restart": "Dark restart in progress: ties open, reserves closed", mixed: "Mixed: some switches are not in their normal position", none: "No *-EMERGENCY-RESERVE or *-TIE switches found" }[r.mode] ?? r.mode;
+  const banner = el("div", { class: "banner " + (r.ready ? "ok" : r.mode === "none" ? "" : "bad") },
+    el("div", { class: "banner-word", text: r.ready ? "Ready" : r.mode === "none" ? "Not configured" : "Not ready" }),
+    el("div", { class: "banner-sub", text: `${modeText} · threshold ${r.minChargePct}% · main grid is circuit group ${r.mainGroup ?? "?"}` }));
+  main.append(banner);
+  if (!r.switches.length) {
+    main.append(el("div", { class: "card" }, el("h2", {}, "How to set it up"),
+      el("p", { class: "muted", text: "Name a power switch <SITE>-EMERGENCY-RESERVE to mark the switch that gates a battery bank, and <SITE>-TIE for the site's cut-off from the main grid. This tab pairs them by site." }),
+      r.otherSwitches.length ? el("p", { class: "muted small", text: `Other switches: ${r.otherSwitches.map((s) => `${s.name} (${s.isOn ? "closed" : "open"})`).join(", ")}` }) : null));
+    return;
+  }
+  const grid = el("div", { class: "grid" });
+  main.append(grid);
+  const sw = (s, label) => {
+    if (!s) return el("div", { class: "swrow missing" }, el("span", { class: "swname", text: label }), el("span", { class: "muted", text: "not present" }));
+    const state = s.isOn ? "closed" : "open";
+    const good = s.isOn === s.expectedOn;
+    return el("div", { class: "swrow" }, el("span", { class: "swname", text: s.name }),
+      el("span", { class: "pill " + (good ? "ok" : "bad"), text: state }), el("span", { class: "muted small", text: `expected ${s.expectedOn ? "closed" : "open"} · circuits ${s.primaryCircuit}/${s.secondaryCircuit}` }));
+  };
+  for (const site of r.sites) {
+    const res = site.reserve?.reserve ?? null;
+    const card = el("div", { class: "card" + (site.ok ? "" : " card-bad") },
+      el("h2", {}, site.site, el("span", { class: "pill " + (site.ok ? "ok" : "bad"), text: site.ok ? "ready" : `${site.issues.length} issue${site.issues.length > 1 ? "s" : ""}` })),
+      sw(site.reserve, `${site.site}-EMERGENCY-RESERVE`), sw(site.tie, `${site.site}-TIE`));
+    if (res) {
+      const p = res.batteryPct ?? 0;
+      card.append(el("div", { class: "battery" },
+        el("div", { class: "k", text: `Reserve battery · circuit group ${res.group}` }),
+        el("div", { class: "fill big" + (p < r.minChargePct ? " low" : "") }, el("span", { style: `width:${Math.min(100, p)}%` })),
+        el("div", { class: "d" }, `${fmtPct(res.batteryPct)} of ${fmtNum(res.batteryMWh)} MWh`,
+          res.batteryInMW > 0 ? ` · charging ${fmtMW(res.batteryInMW)}${res.timeToFull ? ` (full in ${res.timeToFull})` : ""}` : "",
+          res.batteryOutMW > 0 ? ` · discharging ${fmtMW(res.batteryOutMW)}${res.timeToEmpty ? ` (empty in ${res.timeToEmpty})` : ""}` : "",
+          res.consumedMW > 0 ? ` · ${fmtMW(res.consumedMW)} load` : "", res.productionMW > 0 ? ` · ${fmtMW(res.productionMW)} generation` : "",
+          res.fuseTripped ? " · FUSE TRIPPED" : "")));
+    } else if (site.reserve?.isOn) {
+      card.append(el("div", { class: "battery" }, el("div", { class: "d muted", text: "Switch is closed, so the reserve and the grid are one circuit; nothing is held back." })));
+    }
+    if (site.issues.length) card.append(el("ul", { class: "issues" }, site.issues.map((i) => el("li", { text: i }))));
+    if (site.notes.length) card.append(el("ul", { class: "issues notes" }, site.notes.map((i) => el("li", { text: i }))));
+    grid.append(card);
+  }
+  // History for each held-back reserve: the battery % of its circuit group.
+  for (const site of r.sites) {
+    const res = site.reserve?.reserve;
+    if (!res) continue;
+    const { card, host } = chartCard(`${site.site} reserve battery`, `circuit group ${res.group}`);
+    grid.append(card);
+    const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/power", { group: res.group }))), () => "g", ["battery_pct", "battery_in_mw", "battery_out_mw"]);
+    const row = pv.keys.get("g");
+    lineChart(host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "%", min: 0, max: 100, height: 180, series: row ? [{ label: "Charge", data: row.battery_pct, color: cssVar("--s1") }] : [] });
+    card.append(el("div", { class: "chart-note", text: resNote(pv) + " · group numbers change when the grid is rewired, so a long window may not be this bank" }));
+  }
+}
+
+const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
 
 let renderSeq = 0;
 async function renderTab() {
