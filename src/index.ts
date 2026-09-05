@@ -21,13 +21,16 @@ import {
   round,
   takeSample,
   appendSample,
-  gapSample,
   windowOf,
   type TrendWindow,
   minutesBetween,
   iso,
   type Sample,
 } from "./frm";
+import { cluster, classifyMachine, circuitMap, type MachineState } from "./history";
+import { api, querySeries } from "./api";
+import { runTick, runRollup } from "./sampler";
+import type { Series } from "./store";
 
 type Props = { user: string };
 
@@ -43,6 +46,60 @@ async function guard<T>(fn: () => Promise<T>): Promise<{ content: { type: "text"
 }
 
 const inv = (items: unknown) => asArray(items).map((i: any) => ({ name: i.Name, amount: num(i.Amount ?? i.amount) }));
+
+/** The KV ring covers 24 h; longer battery_trend windows are served from D1. */
+const RING_MINUTES = 1440;
+
+async function batteryTrendFromHistory(env: Env, windowMinutes: number, circuitGroup: number | undefined) {
+  const now = Math.floor(Date.now() / 1000);
+  const from = now - windowMinutes * 60;
+  const out = await querySeries(env, { kind: "power", key: circuitGroup != null ? String(circuitGroup) : null, from, to: now }, now);
+  const all = Array.isArray(out) ? out : [out];
+  // Only the newest epoch is a trend; older ones are a different save or session.
+  const cur = all[all.length - 1];
+  const byGroup = new Map<number, any[]>();
+  for (const p of cur?.points ?? []) {
+    const g = num(p.circuit_group);
+    byGroup.set(g, [...(byGroup.get(g) ?? []), p]);
+  }
+  const first = cur?.points[0], last = cur?.points[cur.points.length - 1];
+  const rows = [...byGroup].map(([g, pts]) => {
+    const a = pts[0], b = pts[pts.length - 1];
+    const spanMin = (num(b.ts) - num(a.ts)) / 60;
+    const hasBattery = pts.some((p) => p.battery_pct != null);
+    const dPct = hasBattery && a.battery_pct != null && b.battery_pct != null ? num(b.battery_pct) - num(a.battery_pct) : null;
+    const rate = dPct != null && spanMin > 0 ? dPct / spanMin : null;
+    const pcts = pts.map((p) => p.battery_pct).filter((v) => v != null).map(num);
+    return {
+      circuitGroup: g, matchedBy: "group" as const, hasBattery,
+      now: { batteryPct: round(num(b.battery_pct)), inMW: round(num(b.battery_in_mw)), outMW: round(num(b.battery_out_mw)), productionMW: round(num(b.production_mw)), consumptionMW: round(num(b.consumed_mw)), capacityMW: round(num(b.capacity_mw)), fuseTripped: num(b.fuse_tripped) > 0, at: iso(num(b.ts) * 1000) },
+      windowStart: { batteryPct: round(num(a.battery_pct)), productionMW: round(num(a.production_mw)), consumptionMW: round(num(a.consumed_mw)), at: iso(num(a.ts) * 1000) },
+      deltaPct: dPct == null ? null : round(dPct),
+      pctPerMin: rate == null ? null : round(rate, 3),
+      minutesToEmpty: rate != null && rate < 0 ? Math.round(num(b.battery_pct) / -rate) : null,
+      minutesToFull: rate != null && rate > 0 ? Math.round((100 - num(b.battery_pct)) / rate) : null,
+      minPct: pcts.length ? round(Math.min(...pcts)) : null,
+      maxPct: pcts.length ? round(Math.max(...pcts)) : null,
+      deltaProductionMW: round(num(b.production_mw) - num(a.production_mw)),
+      deltaConsumptionMW: round(num(b.consumed_mw) - num(a.consumed_mw)),
+      fuseTrippedInWindow: pts.some((p) => num(p.fuse_tripped) > 0),
+      samples: pts.length,
+    };
+  });
+  return {
+    windowMinutes, source: "d1", res: cur?.res ?? null, epoch: cur?.epoch ?? null,
+    history: {
+      samplesUsed: cur?.points.length ?? 0,
+      spanMinutes: first && last ? round((num(last.ts) - num(first.ts)) / 60) : 0,
+      oldestUsable: first ? iso(num(first.ts) * 1000) : null,
+      truncatedBy: all.length > 1 ? "epoch" : null,
+      truncatedAt: all.length > 1 && first ? iso(num(first.ts) * 1000) : null,
+      gaps: cur?.gaps ?? [],
+      olderEpochs: all.length > 1 ? all.slice(0, -1).map((s) => ({ epoch: s.epoch, session: s.session, points: s.points.length })) : undefined,
+    },
+    rows,
+  };
+}
 
 // ----------------------------------------------------------------------
 // MCP server factory. Stateless: a fresh McpServer per request, no Durable
@@ -398,41 +455,16 @@ function buildServer(env: Env): McpServer {
     async ({ radius_m, min_machines, building, sort, limit }) =>
       guard(async () => {
         const [factory, power] = await Promise.all([frmGet(env, "getFactory"), frmGet(env, "getPower")]);
-        const circuits = new Map<number, any>();
-        for (const c of asArray(power)) circuits.set(num(c.CircuitGroupID ?? c.CircuitID), c);
+        const circuits = circuitMap(power);
+        type State = MachineState;
+        const classify = (m: any): State => classifyMachine(m, circuits);
 
-        type State = "running" | "blocked" | "starved" | "unpowered" | "paused" | "unconfigured" | "idle";
-        const classify = (m: any): State => {
-          if (m.IsPaused) return "paused";
-          if (m.IsConfigured === false) return "unconfigured";
-          if (m.IsProducing) return "running";
-          const c = circuits.get(num(m.PowerInfo?.CircuitGroupID));
-          if (m.PowerInfo?.FuseTriggered || (c && num(c.PowerCapacity) === 0)) return "unpowered";
-          if (asArray(m.OutputInventory).some((o: any) => num(o.MaxAmount) > 0 && num(o.Amount) >= num(o.MaxAmount))) return "blocked";
-          const stock = new Map<string, number>(asArray(m.InputInventory).map((i: any) => [String(i.Name), num(i.Amount)]));
-          if (asArray(m.ingredients).some((i: any) => (stock.get(String(i.Name)) ?? 0) === 0)) return "starved";
-          return "idle";
-        };
-
-        const r = radius_m * 100;
         const machines = asArray(factory)
           .filter((m) => !building || String(m.Name ?? "").toLowerCase().includes(building.toLowerCase()))
-          .map((m) => ({ m, p: pt(m)! }))
-          .filter((x) => x.p)
-          .sort((a, b) => a.p.x - b.p.x || a.p.y - b.p.y);
-
-        type Cluster = { cx: number; cy: number; cz: number; n: number; members: any[] };
-        const clusters: Cluster[] = [];
-        for (const { m, p } of machines) {
-          let best: Cluster | null = null, bd = Infinity;
-          for (const c of clusters) {
-            const d = Math.hypot(c.cx - p.x, c.cy - p.y);
-            if (d <= r && d < bd) { best = c; bd = d; }
-          }
-          if (!best) { best = { cx: p.x, cy: p.y, cz: p.z, n: 0, members: [] }; clusters.push(best); }
-          best.members.push(m); best.n++;
-          best.cx += (p.x - best.cx) / best.n; best.cy += (p.y - best.cy) / best.n; best.cz += (p.z - best.cz) / best.n;
-        }
+          .map((m) => ({ item: m, p: pt(m)! }))
+          .filter((x) => x.p);
+        // Same clustering the history sampler uses (src/history.ts), so site rows line up with /api/series/site.
+        const clusters = cluster(machines, radius_m * 100);
 
         const totals: Record<State, number> = { running: 0, blocked: 0, starved: 0, unpowered: 0, paused: 0, unconfigured: 0, idle: 0 };
         const rows = clusters
@@ -693,14 +725,16 @@ function buildServer(env: Env): McpServer {
       description:
         "Battery and power trend per circuit group over window_minutes, from the sampler history (cron every 5 min plus every call to a trend tool): " +
         "battery % now vs window start, %/min, projected minutes to empty or full at that rate, min/max in window, and production/consumption deltas. A trend, not a snapshot. " +
-        "Group numbers are renumbered when you rewire, so history is matched by member circuit IDs; matchedBy tells you how, and 'none' means the grid is new since the window started.",
+        "Group numbers are renumbered when you rewire, so history is matched by member circuit IDs; matchedBy tells you how, and 'none' means the grid is new since the window started. " +
+        "Windows longer than the 24 h KV ring are answered from D1 history instead (raw 5-minute samples for 7 days, hourly beyond), matched by group number.",
       inputSchema: z.object({
-        window_minutes: z.number().min(5).max(1440).default(30),
+        window_minutes: z.number().min(5).max(90 * 1440).default(30),
         circuit_group: z.number().int().optional(),
       }),
     },
     async ({ window_minutes, circuit_group }) =>
       guard(async () => {
+        if (window_minutes > RING_MINUTES) return batteryTrendFromHistory(env, window_minutes, circuit_group);
         const sample = await takeSample(env);
         const ring = await appendSample(env, sample);
         const w = windowOf(ring, window_minutes, sample.t);
@@ -744,6 +778,38 @@ function buildServer(env: Env): McpServer {
             };
           });
         return { windowMinutes: window_minutes, history: history(w, sample.t), rows };
+      }),
+  );
+
+  server.registerTool(
+    "trend",
+    {
+      description:
+        "Historical series from D1 (the same data as GET /api/series/*): power per circuit group, a site's machine states (by lookup id, or 'all' for every cluster), " +
+        "generator fields (field id, 'all', or omit for map-wide), depot stock per item, item production/consumption, a train station's platforms, or sink progress. " +
+        "from/to are unix seconds; res defaults to raw 5-minute samples for windows of ≤ 7 days and hourly aggregates beyond. " +
+        "One series per epoch when the window spans a session change or save reload; gaps list outages, which are never interpolated across.",
+      inputSchema: z.object({
+        series: z.enum(["power", "site", "gens", "depot", "prod", "station", "sinks"]),
+        key: z.string().optional().describe("site id, field id, item name, station name, or circuit group; 'all' for every site/field cluster"),
+        from: z.number().int().optional().describe("unix seconds; default 24 h before `to`"),
+        to: z.number().int().optional().describe("unix seconds; default now"),
+        res: z.enum(["raw", "hourly"]).optional(),
+        max_points: z.number().int().min(10).max(5000).default(600).describe("thin evenly to at most this many points per series"),
+      }),
+    },
+    async ({ series, key, from, to, res, max_points }) =>
+      guard(async () => {
+        const now = Math.floor(Date.now() / 1000);
+        const t = to ?? now, f = from ?? t - 24 * 3600;
+        if (f > t) throw new Error("from must be <= to");
+        const out = await querySeries(env, { kind: series, key, from: f, to: t, res }, now);
+        const thin = (s: Series) => {
+          if (s.points.length <= max_points) return s;
+          const step = s.points.length / max_points;
+          return { ...s, thinned_from: s.points.length, points: Array.from({ length: max_points }, (_, i) => s.points[Math.floor(i * step)]) };
+        };
+        return Array.isArray(out) ? out.map(thin) : thin(out);
       }),
   );
 
@@ -845,8 +911,13 @@ const mcp = {
   },
 };
 
+// /api/* shares the bearer check with /mcp: the provider validates the token before either handler runs.
+const historyApi = {
+  fetch: (request: Request, env: Env, ctx: ExecutionContext) => api.fetch(request, env, ctx),
+};
+
 const provider = new OAuthProvider({
-  apiHandlers: { "/mcp": mcp },
+  apiHandlers: { "/mcp": mcp, "/api/": historyApi },
   defaultHandler: app,
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
@@ -855,20 +926,17 @@ const provider = new OAuthProvider({
 
 export default {
   fetch: (request: Request, env: Env, ctx: ExecutionContext) => provider.fetch(request, env, ctx),
-  // */5: sample power/depot/sink into KV for the trend tools. Daily: purge expired OAuth data.
+  // */5: sample into the KV ring and D1 (one batch). Daily: purge expired OAuth data, then roll up history.
   scheduled: (event: ScheduledController, env: Env, ctx: ExecutionContext) => {
     ctx.waitUntil(
       (async () => {
         if (event.cron.startsWith("*/5")) {
-          try {
-            await appendSample(env, await takeSample(env));
-          } catch (e: any) {
-            console.warn("origin down, writing gap sample:", e?.message ?? e);
-            await appendSample(env, gapSample());
-          }
+          await runTick(env);
         } else {
           const r = await provider.purgeExpiredData(env);
           console.log("oauth purge:", JSON.stringify(r));
+          const { cutoff } = await runRollup(env);
+          console.log("history rollup: raw samples before", new Date(cutoff * 1000).toISOString(), "rolled to hourly");
         }
       })(),
     );

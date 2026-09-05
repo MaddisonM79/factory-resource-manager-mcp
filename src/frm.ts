@@ -3,6 +3,7 @@
 // carry FRM's own API key if configured.
 
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
+import type { Snapshot } from "./history.ts";
 
 export interface Env {
   FRM_BASE_URL: string;
@@ -13,6 +14,8 @@ export interface Env {
   ADMIN_PASSPHRASE: string;
   OAUTH_KV: KVNamespace;
   OAUTH_PROVIDER: OAuthHelpers;
+  /** history: raw 5-minute samples + hourly aggregates (see migrations/) */
+  DB: D1Database;
 }
 
 export const READ_ENDPOINTS = [
@@ -229,23 +232,40 @@ const RING_MAX = 700;
 const sinkOf = (s: any): SinkSample | null =>
   s ? { total: num(s.TotalPoints), toCoupon: num(s.PointsToCoupon), coupons: num(s.NumCoupon), pct: num(s.Percent) } : null;
 
-/** Fetch one snapshot. Throws if getPower fails (origin down); other parts are best-effort. */
-export async function takeSample(env: Env): Promise<Sample> {
+/**
+ * Fetch one snapshot of raw FRM payloads. getPower (and, when `full`, getSessionInfo) must
+ * succeed or this throws (origin down); everything else is best-effort. `full` adds the
+ * heavy endpoints the D1 sampler needs; trend tools use the light form.
+ */
+export async function fetchSnapshot(env: Env, full = false): Promise<Snapshot> {
+  const opt = (e: ReadEndpoint) => frmGet(env, e).catch(() => null);
   const [power, cloud, sink, xsink, session] = await Promise.all([
     frmGet(env, "getPower"),
-    frmGet(env, "getCloudInv").catch(() => null),
-    frmGet(env, "getResourceSink").catch(() => null),
-    frmGet(env, "getExplorationSink").catch(() => null),
-    frmGet(env, "getSessionInfo").catch(() => null),
+    opt("getCloudInv"),
+    opt("getResourceSink"),
+    opt("getExplorationSink"),
+    full ? frmGet(env, "getSessionInfo") : opt("getSessionInfo"),
   ]);
-  const cloudMap: Record<string, number> | null = cloud
-    ? Object.fromEntries(asArray(cloud).map((i: any) => [String(i.Name), num(i.Amount)]))
+  const snap: Snapshot = { t: Date.now(), power, cloud, sink, xsink, session };
+  if (full) {
+    const [factory, generators, prodStats, stations, trains, schematics] = await Promise.all([
+      opt("getFactory"), opt("getGenerators"), opt("getProdStats"), opt("getTrainStation"), opt("getTrains"), opt("getSchematics"),
+    ]);
+    Object.assign(snap, { factory, generators, prodStats, stations, trains, schematics });
+  }
+  return snap;
+}
+
+/** The KV ring's view of a snapshot. */
+export function toSample(snap: Snapshot): Sample {
+  const cloudMap: Record<string, number> | null = snap.cloud
+    ? Object.fromEntries(asArray(snap.cloud).map((i: any) => [String(i.Name), num(i.Amount)]))
     : null;
-  const sess: any = asArray(session)[0];
+  const sess: any = asArray(snap.session)[0];
   return {
-    t: Date.now(),
+    t: snap.t,
     session: sess ? { name: String(sess.SessionName ?? ""), play: num(sess.TotalPlayDuration) } : undefined,
-    power: asArray(power).map((c: any) => ({
+    power: asArray(snap.power).map((c: any) => ({
       g: num(c.CircuitGroupID ?? c.CircuitID),
       ids: asArray(c.AssociatedCircuits).map(num).sort((a, b) => a - b),
       cap: num(c.PowerCapacity), prod: num(c.PowerProduction), cons: num(c.PowerConsumed), max: num(c.PowerMaxConsumed),
@@ -253,9 +273,14 @@ export async function takeSample(env: Env): Promise<Sample> {
       fuse: !!c.FuseTriggered,
     })),
     cloud: cloudMap,
-    sink: sinkOf(asArray(sink)[0]),
-    xsink: sinkOf(asArray(xsink)[0]),
+    sink: sinkOf(asArray(snap.sink)[0]),
+    xsink: sinkOf(asArray(snap.xsink)[0]),
   };
+}
+
+/** Fetch one sample. Throws if getPower fails (origin down); other parts are best-effort. */
+export async function takeSample(env: Env): Promise<Sample> {
+  return toSample(await fetchSnapshot(env));
 }
 
 /** A marker written when the origin was unreachable, so trends never span a downtime hole. */

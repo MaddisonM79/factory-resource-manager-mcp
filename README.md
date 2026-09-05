@@ -21,7 +21,9 @@ claude.ai / Claude Desktop
 Cloudflare Worker  (frm-mcp)             ← this repo
   ├─ /authorize /token /register          workers-oauth-provider, KV-backed
   ├─ /mcp                                 createMcpHandler + MCP SDK v2
-  └─ cron */5                             samples power/depot/sink into KV
+  ├─ /api/*                               history read API (same bearer token as /mcp)
+  ├─ cron */5                             samples into KV (live, 24 h) and D1 (history)
+  └─ cron daily                           OAuth purge + raw → hourly rollup
         │  CF-Access service token
         ▼
 Cloudflare Access  →  cloudflared tunnel  →  FRM web server (localhost:8080)
@@ -47,7 +49,8 @@ service-auth policy. Nothing on the game machine is exposed to the internet.
 | `station_throughput` | Per station and platform: mode, status, cargo, rates, trains scheduled / inbound / docked |
 | `sink_rates` | AWESOME Sink coupons, points/min, ETA to next coupon, sink buildings |
 | `depot_status` | Dimensional Depot per item: stock, capacity, full, fill rate, minutes to full, when it filled |
-| `battery_trend` | Battery % and power deltas per circuit over a window |
+| `battery_trend` | Battery % and power deltas per circuit over a window; windows beyond 24 h are served from D1 history |
+| `trend` | Any history series (power, site, gens, depot, prod, station, sinks) over a window, from D1. Same data as `/api/series/*` |
 | `frm_get` | Any of ~75 raw FRM read endpoints with `filter` / `fields` / `limit` / `offset` |
 | `set_enabled` | Toggle buildings by ID. Gated, off by default |
 | `frm_write` | Raw POST to any FRM write endpoint. Gated, off by default |
@@ -70,6 +73,11 @@ endpoint with `limit: 1` and compare keys.
   its own `Inventory`, `LoadingMode`, `LoadingStatus`, `DockingStatus`.
 - `getBelts.ItemsPerMinute` is the tier cap, not live flow. `belt_load`
   infers problems from the machine a belt connects to instead.
+- `getGenerators`: `FuelAmount` (number), `CanStart`, `ProductionCapacity`.
+  `AvailableFuel` lists the fuel types a generator accepts, not its stock.
+  The HUB burners are `Build_GeneratorIntegratedBiomass_C`.
+- `getTrains.Docking` is `TDS_Docked` / `TDS_None`; `TrainStation` is the
+  station the train is at or heading to.
 - No per-building sink rate, no train dwell history, no depot upload rate.
   The trend tools derive rates from the sampler instead.
 
@@ -78,7 +86,69 @@ endpoint with `limit: 1` and compare keys.
 `sink_rates`, `depot_status`, and `battery_trend` read a ring of snapshots in
 KV (`samples:ring`, 24 hours). A cron trigger samples `getPower`,
 `getCloudInv`, and both sinks every 5 minutes, and every trend call adds a
-sample of its own. A second daily cron purges expired OAuth data.
+sample of its own. The KV ring is the live view; D1 is history.
+
+### History (D1)
+
+Every 5-minute tick also fetches `getFactory`, `getGenerators`,
+`getProdStats`, `getTrainStation`, and `getTrains`, and writes one D1 batch:
+
+| table | one row per | notes |
+|---|---|---|
+| `power_samples` | circuit group | capacity, production, draw, battery, fuse |
+| `site_samples` | spatial cluster of machines (200 m) | counts by state, MW, productivity, cluster center |
+| `gen_samples` | (fuel type, generator field) | plus a map-wide row per fuel type with `field_id = 0` |
+| `depot_samples` | depot item | stock, capacity, full |
+| `prod_samples` | item | straight from `getProdStats` |
+| `station_samples` | freight platform | mode, cargo, rate, docked train, inbound count |
+| `train_visits` | dock/undock | opened when a train docks, closed when it leaves; `delta_cargo` = platform stock at arrival minus at departure |
+| `sink_samples` | sink | coupons, points to next, points/min |
+| `gap_samples` | unreachable tick | the only row written that tick |
+
+Every sample row carries `ts`, `session` (FRM `SessionName`), `playtime`, and
+`epoch`. The epoch increments when the session name changes or play time goes
+backwards (a save was reloaded); no rate, delta, or train visit ever crosses
+an epoch boundary or a gap. Raw rows are kept for 7 days; the daily cron rolls
+older hours into `hourly_*` tables (AVG, plus MIN/MAX for `running`,
+`blocked`, `starved`, `dry`, `stock`) with `sample_count` and `gap_count`.
+The rollup is idempotent. `train_visits` and `gap_samples` are never rolled
+up or deleted.
+
+Sites and generator fields are spatial clusters, not stable ids. The sampler
+stores cluster centers; the read API resolves them to the `sites` / `fields`
+lookup tables by nearest center within 200 m. The migration seeds the 11
+sites and 5 generator fields of the current save with real centers and
+recipe-based names; rename them with
+`PATCH /api/lookup/sites/:id {"name": "Iron Row"}` (`x`, `y`, `z` can be
+patched too). A lookup row whose coordinates are NULL is filled in by the
+sampler on the next live tick, largest unclaimed cluster first, so a new
+site only needs a name. Clusters that match nothing come back with
+`site_id: null` and their raw center.
+
+#### Read API
+
+Same bearer token as `/mcp`. All series take `from`, `to` (unix seconds,
+default the last 24 h) and optional `res=raw|hourly`; when omitted, raw for
+windows of ≤ 7 days inside raw retention, hourly otherwise.
+
+```
+GET /api/live                          KV ring + staleness_seconds (?minutes=)
+GET /api/series/power                  ?group= for one circuit group
+GET /api/series/site/:id               one site;  /api/series/site = every cluster, resolved
+GET /api/series/gens?field=:id         omit field for map-wide; field=all for every cluster
+GET /api/series/depot/:item
+GET /api/series/prod/:item
+GET /api/series/station/:name
+GET /api/series/sinks
+GET /api/visits?station=&train=&from=&to=
+GET /api/lookup/sites                  PATCH /api/lookup/sites/:id
+GET /api/lookup/fields                 PATCH /api/lookup/fields/:id
+```
+
+A series is `{ epoch, session, res, points: [{ ts, ... }], gaps: [{ from, to }] }`;
+when the window spans epochs you get an array of them. Hourly points add
+`sample_count` and `gap_count`; treat `gap_count > 0` as low confidence.
+Nothing under `/api` can reach the FRM tunnel.
 
 ## Deploying your own
 
@@ -99,10 +169,13 @@ and `cloudflared` on the game machine.
    ```bash
    npm install
    npx wrangler kv namespace create OAUTH_KV     # put the id in wrangler.jsonc
+   npx wrangler d1 create frm-history            # put the database_id in wrangler.jsonc
+   npx wrangler d1 migrations apply frm-history --remote
    ```
 
-   Edit `wrangler.jsonc`: your `account_id`, the KV id, your Worker hostname
-   under `routes`, and `FRM_BASE_URL` pointing at the tunnel hostname. Then:
+   Edit `wrangler.jsonc`: your `account_id`, the KV and D1 ids, your Worker
+   hostname under `routes`, and `FRM_BASE_URL` pointing at the tunnel
+   hostname. Then:
 
    ```bash
    npx wrangler secret put CF_ACCESS_CLIENT_ID
@@ -143,7 +216,9 @@ curl https://<your-worker-host>/.well-known/oauth-authorization-server
 
 ```bash
 npm run typecheck
+npm test                  # node:test + node:sqlite standing in for D1; no extra deps
 npx wrangler dev          # needs a .dev.vars with the secrets above
+npx wrangler d1 migrations apply frm-history --local
 ```
 
 Stack: `agents` (`createMcpHandler`), `@modelcontextprotocol/server` v2,
