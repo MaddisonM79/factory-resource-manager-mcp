@@ -7,11 +7,16 @@
   "compatibility_flags": ["nodejs_compat"],
   "routes": [{ "pattern": "frm-mcp.lmam.tech", "custom_domain": true }],
   "observability": { "enabled": true },
-  // Sampler: every 5 min snapshot getPower/getCloudInv/sink into KV for trend tools.
-  // Daily: purge expired OAuth grants/tokens.
+  // Sampler: every 5 min snapshot into the KV ring (live view) and D1 (history).
+  // Daily: purge expired OAuth grants/tokens, then roll raw samples older than 7 days into hourly rows.
   "triggers": { "crons": ["*/5 * * * *", "17 4 * * *"] },
   "kv_namespaces": [
     { "binding": "OAUTH_KV", "id": "d586403127cc4aeeaae8faf78faf901a" }
+  ],
+  // History. Create with `npx wrangler d1 create frm-history`, put the id here,
+  // then `npx wrangler d1 migrations apply frm-history --remote`.
+  "d1_databases": [
+    { "binding": "DB", "database_name": "frm-history", "database_id": "REPLACE_WITH_D1_ID", "migrations_dir": "migrations" }
   ],
   "vars": {
     "FRM_BASE_URL": "https://frm.lmam.tech",

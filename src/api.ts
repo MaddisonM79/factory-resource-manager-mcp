@@ -1,0 +1,94 @@
+// Read API for the history tables and the live KV ring. Mounted behind the OAuth
+// provider at /api/, so it takes the same bearer token as /mcp. Read-only except
+// renaming lookup rows; nothing here can reach the FRM tunnel.
+
+import { Hono } from "hono";
+import { type Env, readSamples } from "./frm.ts";
+import { RAW_RETENTION_SECONDS, pickRes, type Res } from "./history.ts";
+import { readSeries, readVisits, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "./store.ts";
+
+export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
+
+/** One series, or one per epoch when the range spans several. Shared by the HTTP routes and the `trend` MCP tool. */
+export async function querySeries(env: Env, r: SeriesRequest, now = Math.floor(Date.now() / 1000)): Promise<Series | Series[]> {
+  const res: Res = pickRes(r.from, r.to, now, r.res);
+  const out = await readSeries(env.DB, { kind: r.kind, key: r.key, from: r.from, to: r.to, res });
+  if (out.length === 1) return out[0];
+  if (out.length === 0) return { epoch: null as unknown as number, session: "", res, points: [], gaps: [] };
+  return out;
+}
+
+const api = new Hono<{ Bindings: Env }>();
+
+function range(c: any, now: number): { from: number; to: number; res: string | null } {
+  const to = c.req.query("to") != null ? Number(c.req.query("to")) : now;
+  const from = c.req.query("from") != null ? Number(c.req.query("from")) : to - 24 * 3600;
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from > to) throw new BadRequest("from/to must be unix seconds with from <= to");
+  const res = c.req.query("res") ?? null;
+  if (res != null && res !== "raw" && res !== "hourly") throw new BadRequest("res must be raw or hourly");
+  return { from: Math.floor(from), to: Math.floor(to), res };
+}
+
+class BadRequest extends Error {}
+
+api.onError((e, c) => {
+  if (e instanceof BadRequest) return c.json({ error: e.message }, 400);
+  if (e instanceof NotFound) return c.json({ error: e.message }, 404);
+  console.error("api:", e);
+  return c.json({ error: e.message ?? String(e) }, 500);
+});
+
+api.get("/api/live", async (c) => {
+  const ring = await readSamples(c.env);
+  const minutes = Number(c.req.query("minutes") ?? 1440);
+  const now = Date.now();
+  const cut = now - (Number.isFinite(minutes) ? minutes : 1440) * 60_000;
+  const latest = ring[ring.length - 1] ?? null;
+  return c.json({
+    now: Math.floor(now / 1000),
+    staleness_seconds: latest ? Math.floor((now - latest.t) / 1000) : null,
+    gap: latest?.gap ?? null,
+    latest,
+    ring: ring.filter((s) => s.t >= cut),
+    raw_retention_seconds: RAW_RETENTION_SECONDS,
+  });
+});
+
+const series = (kind: SeriesKind, keyOf: (c: any) => string | null | undefined) => async (c: any) => {
+  const now = Math.floor(Date.now() / 1000);
+  const { from, to, res } = range(c, now);
+  return c.json(await querySeries(c.env, { kind, key: keyOf(c), from, to, res }, now));
+};
+
+api.get("/api/series/power", series("power", (c) => c.req.query("group")));
+api.get("/api/series/site", series("site", () => "all"));
+api.get("/api/series/site/:id", series("site", (c) => c.req.param("id")));
+api.get("/api/series/gens", series("gens", (c) => c.req.query("field")));
+api.get("/api/series/depot/:item", series("depot", (c) => c.req.param("item")));
+api.get("/api/series/prod/:item", series("prod", (c) => c.req.param("item")));
+api.get("/api/series/station/:name", series("station", (c) => c.req.param("name")));
+api.get("/api/series/sinks", series("sinks", () => null));
+
+api.get("/api/visits", async (c) => {
+  const { from, to } = range(c, Math.floor(Date.now() / 1000));
+  return c.json({ from, to, visits: await readVisits(c.env.DB, { from, to, station: c.req.query("station"), train: c.req.query("train") }) });
+});
+
+for (const table of ["sites", "fields"] as const) {
+  api.get(`/api/lookup/${table}`, async (c) => c.json(await listLookup(c.env.DB, table)));
+  api.patch(`/api/lookup/${table}/:id`, async (c) => {
+    const id = Number(c.req.param("id"));
+    const body = await c.req.json().catch(() => null);
+    if (!Number.isInteger(id) || !body || typeof body !== "object") throw new BadRequest("integer id and a JSON body {name?, x?, y?, z?}");
+    const patch: { name?: string; x?: number; y?: number; z?: number } = {};
+    if (body.name !== undefined) { if (typeof body.name !== "string" || !body.name.trim()) throw new BadRequest("name must be a non-empty string"); patch.name = body.name.trim().slice(0, 80); }
+    for (const k of ["x", "y", "z"] as const) if (body[k] !== undefined) { if (typeof body[k] !== "number" || !Number.isFinite(body[k])) throw new BadRequest(`${k} must be a number`); patch[k] = body[k]; }
+    const row = await updateLookup(c.env.DB, table, id, patch);
+    if (!row) throw new NotFound(`no ${table} row ${id}`);
+    return c.json(row);
+  });
+}
+
+api.notFound((c) => c.json({ error: "not found" }, 404));
+
+export { api };
