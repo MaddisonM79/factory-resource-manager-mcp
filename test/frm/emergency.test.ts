@@ -6,7 +6,8 @@ const group = (id: number, circuits: number[], o: Partial<Record<string, number 
   CircuitGroupID: id, AssociatedCircuits: circuits, PowerCapacity: 0, PowerProduction: 0, PowerConsumed: 0,
   BatteryPercent: 0, BatteryCapacity: 0, BatteryInput: 0, BatteryOutput: 0, BatteryTimeEmpty: "00:00:00", BatteryTimeFull: "00:00:00", FuseTriggered: false, ...o,
 });
-const sw = (name: string, on: boolean, primary: number, secondary: number) => ({ ID: `S-${name}`, Name: name, SwitchTag: name, IsOn: on, Primary: primary, Secondary: secondary, location: { x: 0, y: 0, z: 0 } });
+/** A switch's state is its topology: on = both sides on one circuit. The IsOn flag defaults to the truth. */
+const sw = (name: string, on: boolean, primary: number, secondary: number, flag = on) => ({ ID: `S-${name}`, Name: name, SwitchTag: name, IsOn: flag, Primary: primary, Secondary: on ? primary : secondary, location: { x: 0, y: 0, z: 0 } });
 
 const GRID = group(2, [3], { PowerCapacity: 39750, PowerProduction: 39750, PowerConsumed: 9344, BatteryPercent: 100, BatteryCapacity: 8000 });
 const BANK = group(1, [26], { BatteryPercent: 99.96, BatteryCapacity: 8000 });
@@ -42,10 +43,23 @@ test("no tie built yet: a note, and the site is still ready", () => {
   assert.deepEqual(r.sites[0].notes, ["no *-TIE switch for this site yet"]);
 });
 
-test("a side with no cable (circuit -1) is a note, not an issue", () => {
-  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 7, 26), sw("COAST-TIE", true, -1, 7)], [GRID, BANK, group(0, [7])]);
-  assert.equal(r.ready, true);
+test("a side with no cable (circuit -1) is a note; the switch counts as off", () => {
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 7, 26), sw("COAST-TIE", false, -1, 7)], [GRID, BANK, group(0, [7])]);
+  assert.equal(r.sites[0].tie?.isOn, false);
   assert.deepEqual(r.sites[0].notes, ["nothing wired to the primary side yet"]);
+  assert.ok(r.sites[0].issues.some((i) => i.includes("tie is off")));
+});
+
+test("state comes from the circuits, not FRM's flag: a tie with both sides on circuit 0 and IsOn false is on", () => {
+  // The live shape that started this: COAST-TIE IsOn=false, Primary=0, Secondary=0, while the reserve is 0/26.
+  const r = emergencyReport([sw("COAST-EMERGENCY-RESERVE", false, 0, 26), sw("COAST-TIE", true, 0, 0, false)], [group(3, [0], { PowerCapacity: 39500, BatteryCapacity: 8000, BatteryPercent: 100 }), BANK]);
+  const tie = r.sites[0].tie!;
+  assert.equal(tie.isOn, true);
+  assert.equal(tie.reportedOn, false);
+  assert.ok(r.sites[0].notes.some((n) => n.includes("FRM reports the switch as off")));
+  assert.equal(r.mode, "normal");
+  assert.equal(r.ready, true);
+  assert.equal(r.sites[0].reserve?.reserve?.group, 1);
 });
 
 test("the bank is the isolated side with a battery, even when the grid-side circuit is also off-main", () => {
