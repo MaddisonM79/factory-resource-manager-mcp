@@ -9,9 +9,7 @@
   // Custom Domains get their own edge certificate, so deep subdomains are fine here.
   "routes": [
     { "pattern": "mcp.frm.hosted.lmam.tech", "custom_domain": true },
-    { "pattern": "app.frm.hosted.lmam.tech", "custom_domain": true },
-    // Old MCP hostname, kept until the claude.ai connector is re-added on the new one.
-    { "pattern": "frm-mcp.lmam.tech", "custom_domain": true }
+    { "pattern": "app.frm.hosted.lmam.tech", "custom_domain": true }
   ],
   "observability": { "enabled": true },
   // Dashboard static files. run_worker_first so the host switch in src/index.ts sees every request;
@@ -33,7 +31,7 @@
     // CNAME relies on Universal SSL, which does not cover deeper subdomains.
     "FRM_BASE_URL": "https://frm-cft.lmam.tech",
     "FRM_ALLOW_WRITE": "false",
-    "MCP_HOSTS": "mcp.frm.hosted.lmam.tech,frm-mcp.lmam.tech",
+    "MCP_HOSTS": "mcp.frm.hosted.lmam.tech",
     "DASH_HOST": "app.frm.hosted.lmam.tech",
     "HANKO_API_URL": "https://auth.lmam.tech",
     "DASH_ALLOWED_EMAILS": "nerdy.maddison@gmail.com"
