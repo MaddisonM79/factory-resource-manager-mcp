@@ -85,3 +85,7 @@ Or `npx @modelcontextprotocol/inspector` against `https://frm-mcp.lmam.tech/mcp`
   its own `Inventory`, `LoadingMode`, `LoadingStatus`, `DockingStatus`.
   If a curated tool looks empty, hit `frm_get` on the raw endpoint with
   `limit: 1` and check the keys.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
