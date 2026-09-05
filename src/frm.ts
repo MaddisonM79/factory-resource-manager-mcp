@@ -98,7 +98,7 @@ async function doFetch(url: string, init: RequestInit): Promise<Response> {
     return await fetch(url, init);
   } catch (e: any) {
     const why = e?.name === "TimeoutError" ? "timed out after 20s" : (e?.message ?? String(e));
-    throw new FrmError(`FRM origin unreachable (${why}). Is the Shadow box awake, Satisfactory running with a save loaded, and the FRM web server started?`);
+    throw new FrmError(`FRM origin unreachable (${why}). Is the game machine awake, Satisfactory running with a save loaded, and the FRM web server started?`);
   }
 }
 

@@ -779,10 +779,10 @@ app.post("/authorize", async (c) => {
   const oauth = JSON.parse(atob(state));
   const { redirectTo } = await c.env.OAUTH_PROVIDER.completeAuthorization({
     request: oauth,
-    userId: "maddie",
+    userId: "owner",
     metadata: { label: "frm-mcp" },
     scope: oauth.scope,
-    props: { user: "maddie" } satisfies Props,
+    props: { user: "owner" } satisfies Props,
   });
   return Response.redirect(redirectTo, 302);
 });
