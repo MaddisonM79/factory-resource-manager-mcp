@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "frm-mcp",
+  "main": "src/index.ts",
+  "account_id": "baf35e5e36c3958940832d43b07e466a",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "routes": [{ "pattern": "frm-mcp.lmam.tech", "custom_domain": true }],
+  "observability": { "enabled": true },
+  // Sampler: every 5 min snapshot getPower/getCloudInv/sink into KV for trend tools.
+  // Daily: purge expired OAuth grants/tokens.
+  "triggers": { "crons": ["*/5 * * * *", "17 4 * * *"] },
+  "kv_namespaces": [
+    { "binding": "OAUTH_KV", "id": "d586403127cc4aeeaae8faf78faf901a" }
+  ],
+  "vars": {
+    "FRM_BASE_URL": "https://frm.lmam.tech",
+    "FRM_ALLOW_WRITE": "false"
+  }
+  // Secrets (wrangler secret put):
+  //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access)
+  //   CF_ACCESS_CLIENT_SECRET  Access service token secret
+  //   ADMIN_PASSPHRASE         passphrase for the OAuth approval page
+  //   FRM_API_KEY              optional; FRM's own key, only needed for write endpoints
+}
