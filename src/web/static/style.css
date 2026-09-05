@@ -164,3 +164,12 @@ hanko-auth { --brand-color: var(--accent); --font-family: system-ui, -apple-syst
 .issues { margin: 10px 0 0; padding-left: 18px; color: var(--critical); font-size: 13px; }
 .issues li { margin: 2px 0; }
 .issues.notes { color: var(--muted); }
+
+/* Trains tab */
+.card h3 { margin: 14px 0 6px; font-size: 12px; font-weight: 600; color: var(--ink-2); text-transform: uppercase; letter-spacing: .04em; }
+.pill.warn { border-color: var(--warning); color: var(--ink); }
+.timetable { margin: 0; padding-left: 22px; }
+.timetable li { padding: 3px 0; display: flex; gap: 10px; align-items: center; }
+.timetable li.cur { font-weight: 600; }
+ul.plain { margin: 0; padding-left: 18px; }
+ul.plain li { padding: 2px 0; }
