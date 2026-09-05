@@ -1,7 +1,9 @@
 // Emergency dark-restart readiness. Power switches named *-EMERGENCY-RESERVE gate a battery
-// bank that must stay isolated and full; *-TIE switches are the cut-off from the main grid.
-// Both are open in normal operation. A dark restart closes the reserves to bring the grid
-// back up behind them. Built from getSwitches + getPower, so it is live, not sampled.
+// bank that must stay isolated and full: the switch is OFF in normal operation. *-TIE switches
+// are the site's cut-off from the main grid: ON in normal operation. A dark restart turns the
+// ties off and the reserves on, then brings the grid back up behind them.
+// Vocabulary is on/off throughout (FRM's IsOn); "open" means different things to different people.
+// Built from getSwitches + getPower, so it is live, not sampled.
 
 import { asArray, num, loc } from "./client.ts";
 
@@ -18,7 +20,10 @@ export interface GroupView {
   productionMW: number;
   consumedMW: number;
   batteryPct: number | null;
+  /** bank size */
   batteryMWh: number;
+  /** energy actually held right now: pct × size */
+  storedMWh: number | null;
   batteryInMW: number;
   batteryOutMW: number;
   timeToEmpty: string | null;
@@ -71,6 +76,7 @@ export function groupViews(power: unknown): GroupView[] {
       consumedMW: num(g.PowerConsumed),
       batteryPct: cap > 0 ? num(g.BatteryPercent) : null,
       batteryMWh: cap,
+      storedMWh: cap > 0 ? Math.round(cap * num(g.BatteryPercent)) / 100 : null,
       batteryInMW: num(g.BatteryInput),
       batteryOutMW: num(g.BatteryOutput),
       timeToEmpty: cap > 0 && g.BatteryTimeEmpty && g.BatteryTimeEmpty !== "00:00:00" ? String(g.BatteryTimeEmpty) : null,
@@ -106,12 +112,14 @@ export function emergencyReport(switchesRaw: unknown, power: unknown, opts: { mi
     if (pc < 0 || sc < 0) notes.push(`nothing wired to the ${pc < 0 && sc < 0 ? "switch" : pc < 0 ? "primary side" : "secondary side"} yet`);
     let reserve: GroupView | null = null;
     if (role === "reserve") {
-      if (isOn) issues.push("switch is closed: the reserve is bridged to the grid instead of held back");
+      if (isOn) issues.push("reserve switch is on: the bank is bridged to the grid instead of held back");
       const sides = [primary, secondary].filter((g): g is GroupView => !!g);
       const isolated = sides.filter((g) => !main || g.group !== main.group);
-      // Closed switch: both sides are the same group, nothing is "behind" it. Open: the side that is not the grid.
+      // Switch on: both sides are the same group, nothing is "behind" it. Off: the side that is not the grid,
+      // preferring the one that actually has a battery, then the one with less generation.
+      const score = (g: GroupView) => (g.batteryMWh > 0 ? 0 : 1e12) + g.capacityMW;
       reserve = primary && secondary && primary.group === secondary.group ? null
-        : isolated.length ? isolated.reduce((a, b) => (b.capacityMW < a.capacityMW ? b : a)) : null;
+        : isolated.length ? isolated.reduce((a, b) => (score(b) < score(a) ? b : a)) : null;
       if (!isOn && !reserve) issues.push("cannot see a circuit behind the switch (no power group for either side)");
       if (reserve) {
         if (reserve.batteryMWh <= 0) issues.push("no battery behind the switch");
@@ -124,11 +132,11 @@ export function emergencyReport(switchesRaw: unknown, power: unknown, opts: { mi
         if (g && g.batteryMWh > 0 && g.batteryPct != null && g.batteryPct < minChargePct) issues.push(`grid battery at ${pct(g.batteryPct)}, below ${minChargePct}%`);
       }
     } else {
-      if (isOn) issues.push("tie is closed: this site is bridged to the main grid instead of cut off");
+      if (!isOn) issues.push("tie is off: this site is cut off from the main grid");
       for (const [label, g] of [["primary", primary], ["secondary", secondary]] as const) if (g?.fuseTripped) issues.push(`fuse tripped on the ${label} side`);
     }
-    // Both families are open in normal operation.
-    const expectedOn = false;
+    // Normal operation: reserves off, ties on.
+    const expectedOn = role === "tie";
     switches.push({
       id: String(s.ID), name, site: siteOf(name), role, isOn, expectedOn, ok: issues.length === 0, issues, notes,
       primaryCircuit: pc, secondaryCircuit: sc, primary, secondary, reserve, location: loc(s),
@@ -146,14 +154,13 @@ export function emergencyReport(switchesRaw: unknown, power: unknown, opts: { mi
     return { site, reserve, tie, ok: issues.length === 0, issues, notes };
   });
 
-  const reserves = switches.filter((s) => s.role === "reserve");
-  // Mode follows the reserves: all open is normal, all closed is a dark restart under way. Ties are
-  // reported per site (closed = issue) but do not decide the mode.
+  const reserves = switches.filter((s) => s.role === "reserve"), ties = switches.filter((s) => s.role === "tie");
+  // normal: every reserve off and every tie on. dark-restart: every reserve on and every tie off. Anything else is mixed.
   const mode: Mode = !switches.length ? "none"
-    : reserves.every((s) => !s.isOn) ? "normal"
-    : reserves.length > 0 && reserves.every((s) => s.isOn) ? "dark-restart"
+    : reserves.every((s) => !s.isOn) && ties.every((s) => s.isOn) ? "normal"
+    : reserves.length > 0 && reserves.every((s) => s.isOn) && ties.every((s) => !s.isOn) ? "dark-restart"
     : "mixed";
-  // Ready = normal mode and every switch in its normal position with a full reserve behind each ER.
+  // Ready = normal mode, every switch in its normal position, a full bank behind each reserve.
   const ready = mode === "normal" && reserves.length > 0 && switches.every((s) => s.ok);
 
   return { mode, ready, minChargePct, mainGroup: main?.group ?? null, sites, switches, otherSwitches };

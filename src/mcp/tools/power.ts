@@ -179,8 +179,8 @@ export function registerPower(server: McpServer, env: Env): void {
     "emergency_reserve",
     {
       description:
-        "Dark-restart readiness. Power switches named *-EMERGENCY-RESERVE gate a battery bank that must stay isolated (switch open) and full; " +
-        "*-TIE switches are the cut-off from the main grid, also open in normal operation. Reports each site's switches, the circuit and battery behind each reserve " +
+        "Dark-restart readiness. Power switches named *-EMERGENCY-RESERVE gate a battery bank that must stay isolated (switch OFF) and full; " +
+        "*-TIE switches are the site's cut-off from the main grid (ON in normal operation). Switch state is on/off, FRM's IsOn. Reports each site's switches, the circuit and battery behind each reserve " +
         "(charge %, MWh, in/out MW, time to empty or full, fuse), every deviation from the normal state as a plain issue, the overall mode " +
         "(normal, dark-restart in progress, mixed, none) and whether the reserves are ready. Live from getSwitches + getPower; nothing is sampled.",
       inputSchema: z.object({

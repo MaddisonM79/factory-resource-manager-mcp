@@ -52,7 +52,7 @@ service-auth policy. Nothing on the game machine is exposed to the internet.
 | `station_throughput` | Per station and platform: mode, status, cargo, rates, trains scheduled / inbound / docked |
 | `sink_rates` | AWESOME Sink coupons, points/min, ETA to next coupon, sink buildings |
 | `depot_status` | Dimensional Depot per item: stock, capacity, full, fill rate, minutes to full, when it filled |
-| `emergency_reserve` | Dark-restart readiness: `*-EMERGENCY-RESERVE` switches (open, battery full behind them) and `*-TIE` switches (open), the circuit behind each reserve, issues, mode |
+| `emergency_reserve` | Dark-restart readiness: `*-EMERGENCY-RESERVE` switches (off, full bank behind them) and `*-TIE` switches (on), the circuit behind each reserve, issues, mode |
 | `battery_trend` | Battery % and power deltas per circuit over a window; windows beyond 24 h are served from D1 history |
 | `trend` | Any history series (power, site, gens, depot, prod, station, sinks) over a window, from D1. Same data as `/api/series/*` |
 | `frm_get` | Any of ~75 raw FRM read endpoints with `filter` / `fields` / `limit` / `offset` |
@@ -171,13 +171,15 @@ session name, and nothing is interpolated across either. Tables come from
 fields resolved to their lookup names.
 
 Emergency reserves are a naming convention. A power switch named
-`<SITE>-EMERGENCY-RESERVE` is expected open with a full battery bank behind
-it; `<SITE>-TIE` is the site's cut-off from the main grid, also expected open.
-`emergency_reserve` and `/api/emergency` pair them by site and report every
-deviation: a closed reserve, a battery below the threshold, a discharging or
-loaded reserve side, a tripped fuse, a closed tie. A switch not built yet, or
-a side with no cable, is a note rather than an issue. Mode follows the
-reserves: all open is `normal`, all closed is `dark-restart`.
+`<SITE>-EMERGENCY-RESERVE` is expected **off** with a full battery bank behind
+it; `<SITE>-TIE` is the site's cut-off from the main grid, expected **on**.
+A dark restart turns the ties off and the reserves on. `emergency_reserve`
+and `/api/emergency` pair them by site and report every deviation: a reserve
+that is on, a bank below the threshold, a discharging or loaded reserve side,
+a tripped fuse, a tie that is off. A switch not built yet, or a side with no
+cable, is a note rather than an issue. Switch state is always on/off (FRM's
+`IsOn`); "open" is avoided because it means opposite things to different
+people.
 
 Sign-in is [Hanko](https://hanko.io): the login element stores its JWT in a
 first-party `hanko` cookie, the Worker verifies it against the project's JWKS

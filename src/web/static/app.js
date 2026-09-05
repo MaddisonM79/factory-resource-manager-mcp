@@ -47,6 +47,7 @@ const fmtTime = (ts, opts = {}) => new Intl.DateTimeFormat(undefined, { timeZone
 const fmtNum = (v, d = 0) => (v == null || Number.isNaN(v) ? "–" : Number(v).toLocaleString(undefined, { maximumFractionDigits: d, minimumFractionDigits: 0 }));
 const fmtMW = (v) => (v == null ? "–" : Math.abs(v) >= 1000 ? fmtNum(v / 1000, 2) + " GW" : fmtNum(v, 1) + " MW");
 const fmtPct = (v) => (v == null ? "–" : fmtNum(v, 1) + "%");
+const fmtEnergy = (mwh) => (mwh == null ? "–" : mwh >= 1e6 ? fmtNum(mwh / 1e6, 2) + " TWh" : mwh >= 1000 ? fmtNum(mwh / 1000, 2) + " GWh" : fmtNum(mwh, 0) + " MWh");
 function fmtAge(s) {
   if (s == null) return "never";
   if (s < 90) return `${Math.round(s)}s ago`;
@@ -504,14 +505,14 @@ async function tabSinks(main) {
 
 async function tabEmergency(main) {
   const r = await api("/api/emergency");
-  const modeText = { normal: "Normal: reserves held back", "dark-restart": "Dark restart in progress: reserves closed", mixed: "Mixed: some reserves closed, some open", none: "No *-EMERGENCY-RESERVE or *-TIE switches found" }[r.mode] ?? r.mode;
+  const modeText = { normal: "Normal: reserves off, ties on", "dark-restart": "Dark restart in progress: ties off, reserves on", mixed: "Mixed: some switches are not in their normal position", none: "No *-EMERGENCY-RESERVE or *-TIE switches found" }[r.mode] ?? r.mode;
   const banner = el("div", { class: "banner " + (r.ready ? "ok" : r.mode === "none" ? "" : "bad") },
     el("div", { class: "banner-word", text: r.ready ? "Ready" : r.mode === "none" ? "Not configured" : "Not ready" }),
     el("div", { class: "banner-sub", text: `${modeText} · threshold ${r.minChargePct}% · main grid is circuit group ${r.mainGroup ?? "?"}` }));
   main.append(banner);
   if (!r.switches.length) {
     main.append(el("div", { class: "card" }, el("h2", {}, "How to set it up"),
-      el("p", { class: "muted", text: "Name a power switch <SITE>-EMERGENCY-RESERVE to mark the switch that gates a battery bank, and <SITE>-TIE for the site's cut-off from the main grid. Both are open in normal operation. This tab pairs them by site." }),
+      el("p", { class: "muted", text: "Name a power switch <SITE>-EMERGENCY-RESERVE to mark the switch that gates a battery bank (off in normal operation), and <SITE>-TIE for the site's cut-off from the main grid (on in normal operation). This tab pairs them by site." }),
       r.otherSwitches.length ? el("p", { class: "muted small", text: `Other switches: ${r.otherSwitches.map((s) => `${s.name} (${s.isOn ? "closed" : "open"})`).join(", ")}` }) : null));
     return;
   }
@@ -519,10 +520,10 @@ async function tabEmergency(main) {
   main.append(grid);
   const sw = (s, label) => {
     if (!s) return el("div", { class: "swrow missing" }, el("span", { class: "swname", text: label }), el("span", { class: "muted", text: "not present" }));
-    const state = s.isOn ? "closed" : "open";
+    const state = s.isOn ? "on" : "off";
     const good = s.isOn === s.expectedOn;
     return el("div", { class: "swrow" }, el("span", { class: "swname", text: s.name }),
-      el("span", { class: "pill " + (good ? "ok" : "bad"), text: state }), el("span", { class: "muted small", text: `expected ${s.expectedOn ? "closed" : "open"} · circuits ${s.primaryCircuit}/${s.secondaryCircuit}` }));
+      el("span", { class: "pill " + (good ? "ok" : "bad"), text: state }), el("span", { class: "muted small", text: `expected ${s.expectedOn ? "on" : "off"} · circuits ${s.primaryCircuit}/${s.secondaryCircuit}` }));
   };
   for (const site of r.sites) {
     const res = site.reserve?.reserve ?? null;
@@ -534,13 +535,13 @@ async function tabEmergency(main) {
       card.append(el("div", { class: "battery" },
         el("div", { class: "k", text: `Reserve battery · circuit group ${res.group}` }),
         el("div", { class: "fill big" + (p < r.minChargePct ? " low" : "") }, el("span", { style: `width:${Math.min(100, p)}%` })),
-        el("div", { class: "d" }, `${fmtPct(res.batteryPct)} of ${fmtNum(res.batteryMWh)} MWh`,
+        el("div", { class: "d" }, el("b", { text: `${fmtPct(res.batteryPct)} · ${fmtEnergy(res.storedMWh)}` }), ` of ${fmtEnergy(res.batteryMWh)}`,
           res.batteryInMW > 0 ? ` · charging ${fmtMW(res.batteryInMW)}${res.timeToFull ? ` (full in ${res.timeToFull})` : ""}` : "",
           res.batteryOutMW > 0 ? ` · discharging ${fmtMW(res.batteryOutMW)}${res.timeToEmpty ? ` (empty in ${res.timeToEmpty})` : ""}` : "",
           res.consumedMW > 0 ? ` · ${fmtMW(res.consumedMW)} load` : "", res.productionMW > 0 ? ` · ${fmtMW(res.productionMW)} generation` : "",
           res.fuseTripped ? " · FUSE TRIPPED" : "")));
     } else if (site.reserve?.isOn) {
-      card.append(el("div", { class: "battery" }, el("div", { class: "d muted", text: "Switch is closed, so the reserve and the grid are one circuit; nothing is held back." })));
+      card.append(el("div", { class: "battery" }, el("div", { class: "d muted", text: "Switch is on, so the bank and the grid are one circuit; nothing is held back." })));
     }
     if (site.issues.length) card.append(el("ul", { class: "issues" }, site.issues.map((i) => el("li", { text: i }))));
     if (site.notes.length) card.append(el("ul", { class: "issues notes" }, site.notes.map((i) => el("li", { text: i }))));
