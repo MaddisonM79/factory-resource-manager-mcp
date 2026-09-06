@@ -86,10 +86,14 @@ api.get("/api/emergency", async (c) => {
   return c.json({ now: Math.floor(Date.now() / 1000), ...emergencyReport(switches, power, { minChargePct: min }) });
 });
 
-/** Rail network, live: trains with timetables and cargo, stations with platforms, docked and inbound. */
+/** Rail network, live: trains with timetables and cargo, stations with platforms, docked and inbound, signals and their blocks. */
 api.get("/api/trains", async (c) => {
-  const [trains, stations] = await Promise.all([frmGet(c.env, "getTrains"), frmGet(c.env, "getTrainStation")]);
-  return c.json({ now: Math.floor(Date.now() / 1000), ...trainsReport(trains, stations) });
+  const [trains, stations, signals] = await Promise.all([
+    frmGet(c.env, "getTrains"), frmGet(c.env, "getTrainStation"),
+    // Older FRM has no getTrainSignals; the report then simply has no signals.
+    frmGet(c.env, "getTrainSignals").catch(() => null),
+  ]);
+  return c.json({ now: Math.floor(Date.now() / 1000), ...trainsReport(trains, stations, signals) });
 });
 
 api.get("/api/latest", async (c) => {
@@ -128,6 +132,10 @@ api.get("/api/series/depot/:item", series("depot", (c) => c.req.param("item")));
 api.get("/api/series/prod/:item", series("prod", (c) => c.req.param("item")));
 api.get("/api/series/station/:name", series("station", (c) => c.req.param("name")));
 api.get("/api/series/sinks", series("sinks", () => null));
+api.get("/api/series/drone", series("drone", () => "all"));
+api.get("/api/series/drone/:station", series("drone", (c) => c.req.param("station")));
+api.get("/api/series/counter", series("counter", () => "all"));
+api.get("/api/series/counter/:id", series("counter", (c) => c.req.param("id")));
 
 api.get("/api/visits", async (c) => {
   const { from, to } = range(c, Math.floor(Date.now() / 1000));

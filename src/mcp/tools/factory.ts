@@ -16,23 +16,29 @@ import { cluster, classifyMachine, circuitMap, type MachineState } from "../../h
 
 import { guard } from "../shared.ts";
 
+/** FRM's ManuSpeed is the clock speed in percent (100 = stock). Missing means stock. */
+const clockPct = (m: any): number => (typeof m?.ManuSpeed === "number" ? m.ManuSpeed : 100);
+
 export function registerFactory(server: McpServer, env: Env): void {
   server.registerTool(
     "session_status",
     {
-      description: "Quick health check: session info, players online, UObject count, and whether FRM is reachable at all.",
+      description:
+        "Quick health check: session info, players online, UObject count against the engine's capacity (the game crashes when it runs out), and whether FRM is reachable at all.",
     },
     async () =>
       guard(async () => {
-        const [session, players, uobj] = await Promise.all([
+        const [session, players, uobjRaw] = await Promise.all([
           frmGet(env, "getSessionInfo"),
           frmGet(env, "getPlayer"),
           frmGet(env, "getUObjectCount").catch(() => null),
         ]);
+        const u: any = asArray(uobjRaw)[0];
+        const count = num(u?.UObjectCount), capacity = num(u?.UObjectCapacity);
         return {
           session,
-          players: asArray(players).map((p) => ({ name: p.PlayerName ?? p.Name, online: p.Online, location: loc(p), health: p.PlayerHP })),
-          uobjects: uobj,
+          players: asArray(players).map((p) => ({ name: p.PlayerName ?? p.Name, online: p.Online, location: loc(p), health: p.PlayerHP, dead: p.Dead ?? null })),
+          uobjects: u ? { count, capacity, usedPct: capacity ? round((count / capacity) * 100) : null, headroom: capacity ? capacity - count : null } : null,
         };
       }),
   );
@@ -42,21 +48,26 @@ export function registerFactory(server: McpServer, env: Env): void {
     {
       description:
         "Find production buildings that are idle, paused, unconfigured, or running below an efficiency threshold. " +
-        "Groups by building type + recipe so a starved row shows up as one line, not forty.",
+        "Groups by building type + recipe so a starved row shows up as one line, not forty. Each group also counts overclocked / underclocked machines " +
+        "and the power shards and somersloops slotted in them; clock filters on that instead of on problems.",
       inputSchema: z.object({
         max_efficiency: z.number().min(0).max(100).default(95).describe("flag buildings at or below this %"),
         building: z.string().optional().describe("substring on building name, e.g. 'Assembler'"),
         recipe: z.string().optional().describe("substring on recipe name"),
+        clock: z.enum(["any", "over", "under", "sloop"]).default("any").describe("any: problems as usual; over/under: every machine clocked above/below 100 % regardless of state; sloop: every machine with a somersloop"),
         limit: z.number().int().min(1).max(200).default(40),
       }),
     },
-    async ({ max_efficiency, building, recipe, limit }) =>
+    async ({ max_efficiency, building, recipe, clock, limit }) =>
       guard(async () => {
         const all = asArray(await frmGet(env, "getFactory"));
         const eff = (m: any) => num(m.Productivity ?? m.Efficiency);
         const bad = all.filter((m) => {
           if (building && !String(m.Name ?? "").toLowerCase().includes(building.toLowerCase())) return false;
           if (recipe && !String(m.Recipe ?? "").toLowerCase().includes(recipe.toLowerCase())) return false;
+          if (clock === "over") return clockPct(m) > 100;
+          if (clock === "under") return clockPct(m) < 100;
+          if (clock === "sloop") return num(m.Somersloops) > 0;
           const producing = m.IsProducing ?? true;
           const paused = m.IsPaused ?? false;
           const configured = m.IsConfigured ?? true;
@@ -74,6 +85,10 @@ export function registerFactory(server: McpServer, env: Env): void {
             idle: 0,
             paused: 0,
             unconfigured: 0,
+            overclocked: 0,
+            underclocked: 0,
+            powerShards: 0,
+            somersloops: 0,
             examples: [] as any[],
           };
           g.count++;
@@ -81,10 +96,17 @@ export function registerFactory(server: McpServer, env: Env): void {
           if (m.IsProducing === false) g.idle++;
           if (m.IsPaused) g.paused++;
           if (m.IsConfigured === false) g.unconfigured++;
+          if (clockPct(m) > 100) g.overclocked++;
+          if (clockPct(m) < 100) g.underclocked++;
+          g.powerShards += num(m.PowerShards);
+          g.somersloops += num(m.Somersloops);
           if (g.examples.length < 3) {
             g.examples.push({
               id: m.ID,
               efficiency: eff(m),
+              clockPct: clockPct(m),
+              powerShards: num(m.PowerShards),
+              somersloops: num(m.Somersloops),
               location: loc(m),
               ingredients: asArray(m.ingredients ?? m.Ingredients).map((i: any) => ({
                 name: i.Name,
@@ -193,7 +215,7 @@ export function registerFactory(server: McpServer, env: Env): void {
       description:
         "One row per factory site: production buildings clustered spatially (default 200 m radius). Per site: machine counts by state " +
         "(running, blocked = output full, starved = an input is empty, unpowered = circuit has no capacity or fuse tripped, paused, unconfigured, idle), " +
-        "MW draw, buildings and recipes present, circuit groups. Answers 'what's asleep' in one call.",
+        "MW draw, buildings and recipes present, circuit groups, and how many machines are overclocked or underclocked with the shards and somersloops slotted. Answers 'what's asleep' in one call.",
       inputSchema: z.object({
         radius_m: z.number().min(25).max(2000).default(200).describe("cluster radius in metres"),
         min_machines: z.number().int().min(1).default(1),
@@ -225,12 +247,16 @@ export function registerFactory(server: McpServer, env: Env): void {
             const recipes: Record<string, number> = {};
             const groups = new Set<number>();
             let mw = 0, mwMax = 0, prod = 0, fuse = false;
+            const clock = { overclocked: 0, underclocked: 0, powerShards: 0, somersloops: 0 };
             for (const m of c.members) {
               const st = classify(m); states[st]++; totals[st]++;
               buildings[m.Name] = (buildings[m.Name] ?? 0) + 1;
               const rc = m.Recipe ?? "(no recipe)"; recipes[rc] = (recipes[rc] ?? 0) + 1;
               if (m.PowerInfo) { groups.add(num(m.PowerInfo.CircuitGroupID)); mw += num(m.PowerInfo.PowerConsumed); mwMax += num(m.PowerInfo.MaxPowerConsumed); fuse ||= !!m.PowerInfo.FuseTriggered; }
               prod += num(m.Productivity ?? m.Efficiency);
+              if (clockPct(m) > 100) clock.overclocked++;
+              if (clockPct(m) < 100) clock.underclocked++;
+              clock.powerShards += num(m.PowerShards); clock.somersloops += num(m.Somersloops);
             }
             return {
               site: i + 1,
@@ -240,6 +266,7 @@ export function registerFactory(server: McpServer, env: Env): void {
               states,
               mwDraw: round(mw), mwMax: round(mwMax),
               avgProductivity: round(prod / c.n),
+              clock,
               circuitGroups: [...groups].sort((a, b) => a - b),
               fuseTripped: fuse,
               buildings,

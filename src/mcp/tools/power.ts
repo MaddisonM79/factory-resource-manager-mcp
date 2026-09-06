@@ -8,6 +8,7 @@ import {
   asArray,
   matches,
   num,
+  loc,
   round,
   takeSample,
   appendSample,
@@ -19,7 +20,50 @@ import {
 
 import { querySeries } from "../../api/routes.ts";
 import { emergencyReport } from "../../frm/emergency.ts";
+import { fuelTypeOf, isFueled, genCapacityMw, genLoadPct, genWaste } from "../../history/history.ts";
 import { guard, history } from "../shared.ts";
+
+export interface GenSummary {
+  total: number; fueled: number; dry: number;
+  /** mean LoadPercentage over the generators that report it */
+  avgLoadPct: number | null;
+  capacityMW: number;
+  /** generators whose supplemental resource (water for coal / nuclear) is empty while they still have fuel */
+  supplementEmpty: number;
+  /** nuclear only: waste items sitting in output inventories, and generators with a warning */
+  waste: number;
+  warnings: { id: string; name: string; warning: string; location: string }[];
+  /** power shards and somersloops slotted */
+  powerShards: number; somersloops: number;
+}
+
+const emptySummary = (): GenSummary => ({ total: 0, fueled: 0, dry: 0, avgLoadPct: null, capacityMW: 0, supplementEmpty: 0, waste: 0, warnings: [], powerShards: 0, somersloops: 0 });
+
+/** Roll generators up by a key (circuit group, fuel type). Pure, so power_overview's shape can be tested. */
+export function summarizeGenerators(gens: any[], keyOf: (g: any) => string): Record<string, GenSummary> {
+  const out: Record<string, GenSummary> = {};
+  const loads: Record<string, number[]> = {};
+  for (const g of gens) {
+    const k = keyOf(g);
+    const s = (out[k] ??= emptySummary());
+    s.total++;
+    const fueled = isFueled(g);
+    if (fueled) s.fueled++; else s.dry++;
+    s.capacityMW += genCapacityMw(g);
+    const l = genLoadPct(g);
+    if (l != null) (loads[k] ??= []).push(l);
+    if (fueled && g.Supplement?.Name && typeof g.Supplement.PercentFull === "number" && g.Supplement.PercentFull <= 0) s.supplementEmpty++;
+    s.waste += genWaste(g);
+    if (g.NuclearWarning && g.NuclearWarning !== "None") s.warnings.push({ id: String(g.ID ?? ""), name: String(g.Name ?? ""), warning: String(g.NuclearWarning), location: loc(g) });
+    s.powerShards += num(g.PowerShards); s.somersloops += num(g.Somersloops);
+  }
+  for (const [k, s] of Object.entries(out)) {
+    const l = loads[k];
+    s.avgLoadPct = l?.length ? round(l.reduce((a, b) => a + b, 0) / l.length) : null;
+    s.capacityMW = round(s.capacityMW);
+  }
+  return out;
+}
 
 /** The KV ring covers 24 h; longer battery_trend windows are served from D1. */
 const RING_MINUTES = 1440;
@@ -79,12 +123,21 @@ export function registerPower(server: McpServer, env: Env): void {
   server.registerTool(
     "power_overview",
     {
-      description: "Per-circuit power summary: capacity, production, consumption, max draw, headroom, battery state, tripped fuses.",
+      description:
+        "Per-circuit power summary: capacity, production, consumption, max draw, headroom, battery state, tripped fuses, " +
+        "and the generators on each circuit: count, fueled/dry, average load %, capacity, empty supplemental (water) feeds, nuclear waste stock and warnings, shards and sloops. " +
+        "A map-wide roll-up by fuel type follows the circuits.",
+      inputSchema: z.object({
+        include_generators: z.boolean().default(true),
+      }),
     },
-    async () =>
+    async ({ include_generators }) =>
       guard(async () => {
-        const circuits = asArray(await frmGet(env, "getPower"));
-        return circuits.map((c) => {
+        const [power, gensRaw] = await Promise.all([frmGet(env, "getPower"), include_generators ? frmGet(env, "getGenerators").catch(() => null) : Promise.resolve(null)]);
+        const circuits = asArray(power);
+        const gens = asArray(gensRaw);
+        const byGroup = summarizeGenerators(gens, (g) => String(num(g.PowerInfo?.CircuitGroupID)));
+        const rows = circuits.map((c) => {
           const cap = num(c.PowerCapacity);
           const used = num(c.PowerConsumed);
           const max = num(c.PowerMaxConsumed);
@@ -103,13 +156,21 @@ export function registerPower(server: McpServer, env: Env): void {
                   percent: Math.round(num(c.BatteryPercent) * 10) / 10,
                   inMW: num(c.BatteryInput),
                   outMW: num(c.BatteryOutput),
+                  differentialMW: num(c.BatteryDifferential),
                   timeToEmpty: c.BatteryTimeEmpty,
                   timeToFull: c.BatteryTimeFull,
                 }
               : null,
             fuseTriggered: !!c.FuseTriggered,
+            generators: include_generators ? byGroup[String(num(c.CircuitGroupID ?? c.CircuitID))] ?? emptySummary() : undefined,
           };
         });
+        if (!include_generators) return rows;
+        return {
+          circuits: rows,
+          generatorsByFuel: summarizeGenerators(gens, fuelTypeOf),
+          note: gensRaw == null ? "getGenerators failed; generator fields are empty" : undefined,
+        };
       }),
   );
 

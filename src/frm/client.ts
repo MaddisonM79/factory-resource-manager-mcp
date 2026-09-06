@@ -37,9 +37,9 @@ export const READ_ENDPOINTS = [
   "getRefinery", "getSmelter",
   // Factory infrastructure
   "getBelts", "getCables", "getElevators", "getExtractor", "getFrackingActivator",
-  "getHUBTerminal", "getHyperEntrance", "getHypertube", "getPipes", "getPipeJunctions",
+  "getHUBTerminal", "getHyperEntrance", "getHyperJunctions", "getHypertube", "getLifts", "getPipes", "getPipeJunctions",
   "getPortal", "getPump", "getRadarTower", "getResourceSinkBuilding", "getSpaceElevator",
-  "getSplitterMerger", "getSwitches", "getSPWN", "getTradingPost", "getTrainRails",
+  "getSplitterMerger", "getSwitches", "getSPWN", "getThroughputCounter", "getTradingPost", "getTrainRails", "getTrainSignals",
   // Generators
   "getGenerators", "getBiomassGenerator", "getCoalGenerator", "getFuelGenerator",
   "getGeothermalGenerator", "getNuclearGenerator",
@@ -54,9 +54,10 @@ export const READ_ENDPOINTS = [
   "getDrone", "getExplorer", "getFactoryCart", "getTractor", "getTrains", "getTruck",
   "getVehiclePaths", "getVehicles",
   // World
-  "getArtifacts", "getCreatures", "getDoggo", "getDropPod", "getHazards", "getMapMarkers",
-  "getPowerSlug", "getProdStats", "getRecipes", "getSchematics", "getTapes",
-  "getUnlockItems", "getUObjectCount",
+  "getArtifacts", "getBlueprints", "getCreatures", "getDoggo", "getDropPod", "getFallingGiftBundles", "getHazards",
+  "getItemPickups", "getMapMarkers", "getPowerSlug", "getProdStats", "getRecipes", "getSchematics", "getSpawners",
+  "getSporeFlowers", "getTapes", "getUnlockItems", "getUObjectCount",
+  // getAll is registered by FRM 1.5 but retired: it answers with an error object, so it is left out here.
   // Power
   "getPower", "getPowerUsage",
 ] as const;
@@ -258,10 +259,11 @@ export async function fetchSnapshot(env: Env, full = false): Promise<Snapshot> {
   ]);
   const snap: Snapshot = { t: Date.now(), power, cloud, sink, xsink, session };
   if (full) {
-    const [factory, generators, prodStats, stations, trains, schematics] = await Promise.all([
+    const [factory, generators, prodStats, stations, trains, schematics, droneStations, counters] = await Promise.all([
       opt("getFactory"), opt("getGenerators"), opt("getProdStats"), opt("getTrainStation"), opt("getTrains"), opt("getSchematics"),
+      opt("getDroneStation"), opt("getThroughputCounter"),
     ]);
-    Object.assign(snap, { factory, generators, prodStats, stations, trains, schematics });
+    Object.assign(snap, { factory, generators, prodStats, stations, trains, schematics, droneStations, counters });
   }
   return snap;
 }

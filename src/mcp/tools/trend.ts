@@ -15,12 +15,13 @@ export function registerTrend(server: McpServer, env: Env): void {
     {
       description:
         "Historical series from D1 (the same data as GET /api/series/*): power per circuit group, a site's machine states (by lookup id, or 'all' for every cluster), " +
-        "generator fields (field id, 'all', or omit for map-wide), depot stock per item, item production/consumption, a train station's platforms, or sink progress. " +
+        "generator fields (field id, 'all', or omit for map-wide; includes load % and nuclear waste), depot stock per item, item production/consumption, a train station's platforms, sink progress, " +
+        "a drone port's rates and round trips (station name, or 'all'), or a throughput counter's measured items/min (FRM counter ID, or 'all'). " +
         "from/to are unix seconds; res defaults to raw 5-minute samples for windows of ≤ 7 days and hourly aggregates beyond. " +
         "One series per epoch when the window spans a session change or save reload; gaps list outages, which are never interpolated across.",
       inputSchema: z.object({
-        series: z.enum(["power", "site", "gens", "depot", "prod", "station", "sinks"]),
-        key: z.string().optional().describe("site id, field id, item name, station name, or circuit group; 'all' for every site/field cluster"),
+        series: z.enum(["power", "site", "gens", "depot", "prod", "station", "sinks", "drone", "counter"]),
+        key: z.string().optional().describe("site id, field id, item name, station name, drone port name, counter id, or circuit group; 'all' for every site/field cluster, drone port, or counter"),
         from: z.number().int().optional().describe("unix seconds; default 24 h before `to`"),
         to: z.number().int().optional().describe("unix seconds; default now"),
         res: z.enum(["raw", "hourly"]).optional(),

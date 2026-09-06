@@ -4,8 +4,8 @@ import {
   nextEpoch, cluster, resolveCenter, stepVisits, coalesceGaps, pickRes, buildTick, gapState, initialState,
   siteRows, genRows, RAW_RETENTION_SECONDS, HOUR,
 } from "../../src/history/history.ts";
-import { fuelTypeOf, isFueled, fuelAmount, genCapacityMw } from "../../src/history/history.ts";
-import { snapshot, machine, generator, station, train, sink, M } from "../fixtures.ts";
+import { fuelTypeOf, isFueled, fuelAmount, genCapacityMw, droneRows, counterRows } from "../../src/history/history.ts";
+import { snapshot, machine, generator, nuclear, dronePort, counter, station, train, sink, M } from "../fixtures.ts";
 
 test("epoch: first sample is epoch 1, then bumps on session change or playtime regression", () => {
   assert.deepEqual(nextEpoch(null, { session: "A", playtime: 10 }), { epoch: 1, bumped: true });
@@ -146,4 +146,35 @@ test("gap coalescing and resolution selection", () => {
   assert.equal(pickRes(now - RAW_RETENTION_SECONDS - 2 * HOUR, now, now), "hourly", "more than 7 days");
   assert.equal(pickRes(now - 30 * 24 * HOUR, now - 29 * 24 * HOUR, now), "hourly", "short window but outside raw retention");
   assert.equal(pickRes(now - 30 * 24 * HOUR, now, now, "raw"), "raw", "explicit wins");
+});
+
+test("genRows: load % is the mean over generators that report it; nuclear waste is summed, other fuels stay at 0", () => {
+  const gens = genRows([
+    { ...generator(0, 0), LoadPercentage: 80 }, { ...generator(10 * M, 0), LoadPercentage: 40 },
+    nuclear(5000 * M, 0, 30, "Waste Full"), nuclear(5010 * M, 0, 5),
+  ]);
+  const mapWide = Object.fromEntries(gens.filter((g) => g.field_id === 0).map((g) => [g.fuel_type, g]));
+  assert.equal(mapWide.Coal.load_pct, 60);
+  assert.equal(mapWide.Coal.waste, 0);
+  assert.equal(mapWide.Nuclear.load_pct, 60);
+  assert.equal(mapWide.Nuclear.waste, 35);
+  const legacy = genRows([{ ClassName: "Build_GeneratorCoal_C", location: { x: 0, y: 0, z: 0 }, ProductionCapacity: 75, CanStart: true }]);
+  assert.equal(legacy[0].load_pct, null, "an FRM without LoadPercentage yields null, not 0");
+});
+
+test("droneRows and counterRows: one row per port / monitor, unpaired is null, stocks summed", () => {
+  const [out, inn] = droneRows([dronePort("QW-OUT", "QW-IN", { outRate: 90, status: "Loading", fuel: 12 }), dronePort("LONE", null)]);
+  assert.equal(out.station, "QW-OUT"); assert.equal(out.paired, "QW-IN"); assert.equal(out.status, "Loading");
+  assert.equal(out.out_per_min, 90); assert.equal(out.in_per_min, 0); assert.equal(out.est_per_min, 90);
+  assert.equal(out.round_trip_s, 200); assert.equal(out.trip_in, 300);
+  assert.equal(out.fuel, 12); assert.equal(out.input_stock, 500); assert.equal(out.output_stock, 0);
+  assert.equal(inn.paired, null, "FRM's \"None\" pairing is null");
+
+  const [c] = counterRows([counter("CM-1", 0, 0, 240.5, { confidence: 87 })]);
+  assert.deepEqual(c, { counter_id: "CM-1", name: "Throughput Counter", belt: "Build_ConveyorBeltMk3_C", cap_per_min: 270, items_per_min: 240.5, confidence: 87 });
+
+  const t = buildTick(snapshot(), initialState(), 1000);
+  assert.equal(t.drone.length, 2); assert.equal(t.counter.length, 1);
+  const bare = buildTick(snapshot({ droneStations: null, counters: null }), initialState(), 1000);
+  assert.deepEqual([bare.drone, bare.counter], [[], []], "an FRM without these endpoints writes no rows");
 });

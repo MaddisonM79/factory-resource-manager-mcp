@@ -1,6 +1,7 @@
 // Minimal D1Database stand-in over node:sqlite for tests. Covers prepare/bind/all/first/run/batch.
 import { DatabaseSync } from "node:sqlite";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 type Params = (number | string | null)[];
 
@@ -32,9 +33,10 @@ class Stmt {
 
 export class FakeD1 {
   db: DatabaseSync;
-  constructor(migration = new URL("../migrations/0001_history.sql", import.meta.url)) {
+  /** Applies every migrations/*.sql in name order, the way wrangler does. */
+  constructor(dir = fileURLToPath(new URL("../migrations/", import.meta.url))) {
     this.db = new DatabaseSync(":memory:");
-    this.db.exec(readFileSync(migration, "utf8"));
+    for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) this.db.exec(readFileSync(dir + f, "utf8"));
   }
   prepare(sql: string) { return new Stmt(this.db, sql); }
   async batch(stmts: Stmt[]) {

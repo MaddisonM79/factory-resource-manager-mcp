@@ -482,13 +482,22 @@ async function tabGens(main) {
     { key: "fueled", label: "Fueled", num: true },
     { key: "dry", label: "Dry", num: true, render: (r) => el("span", { class: Number(r.dry) ? "neg" : null, text: fmtNum(r.dry) }) },
     { key: "capacity_mw", label: "Capacity", num: true, render: (r) => fmtMW(r.capacity_mw) },
+    { key: "load_pct", label: "Load", num: true, render: (r) => fmtPct(r.load_pct) },
+    { key: "waste", label: "Waste", num: true, render: (r) => (r.fuel_type === "Nuclear" ? el("span", { class: Number(r.waste) ? "neg" : null, text: fmtNum(r.waste) }) : "") },
   ], { initialSort: { key: "capacity_mw", dir: -1 } }));
   grid.append(card);
-  const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/gens"))), (p) => String(p.fuel_type), ["dry", "fueled", "capacity_mw"]);
+  const pv = pivot(asSeriesList(await api(seriesUrl("/api/series/gens"))), (p) => String(p.fuel_type), ["dry", "fueled", "capacity_mw", "load_pct", "waste"]);
   const a = chartCard("Dry generators", "map-wide, per fuel type"); grid.append(a.card);
   lineChart(a.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), height: 200, series: [...pv.keys].map(([k, row]) => ({ label: k, data: row.dry })) });
   const b = chartCard("Generator capacity", "map-wide, per fuel type"); grid.append(b.card);
   lineChart(b.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: " MW", fmt: (v) => fmtNum(v, 0), height: 200, series: [...pv.keys].map(([k, row]) => ({ label: k, data: row.capacity_mw })) });
+  const c = chartCard("Generator load", "map-wide average, per fuel type"); grid.append(c.card);
+  lineChart(c.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "%", min: 0, max: 100, fmt: (v) => fmtNum(v, 0), height: 200, series: [...pv.keys].map(([k, row]) => ({ label: k, data: row.load_pct })) });
+  const nuke = pv.keys.get("Nuclear");
+  if (nuke) {
+    const d = chartCard("Nuclear waste", "items in generator output inventories"); grid.append(d.card);
+    lineChart(d.host, { x: pv.x, gaps: pv.gaps, epochs: pv.epochs, unit: "", fmt: (v) => fmtNum(v, 0), height: 200, series: [{ label: "Waste", data: nuke.waste, color: cssVar("--s2") }] });
+  }
   a.card.append(el("div", { class: "chart-note", text: resNote(pv) }));
 }
 
@@ -594,6 +603,7 @@ async function tabTrains(main) {
     tile("Trains", c.trains, `${c.moving} moving · ${c.docked} docked · ${c.stopped} stopped`),
     tile("Derailed", c.derailed, c.derailed ? "needs a visit" : "none", c.derailed ? "bad" : "ok"),
     tile("Stations", c.stations, `${c.platforms} freight platforms`),
+    tile("Signals", c.signals ?? 0, c.signals ? `${c.signalsStop} at stop · ${c.invalidBlocks} invalid block${c.invalidBlocks === 1 ? "" : "s"}` : "none", c.invalidBlocks ? "bad" : null),
     tile("Dock visits", visits.length, `in the last ${state.range}`),
     tile("Errors", withErrors.length, withErrors.map((t) => t.name).slice(0, 3).join(", ") || "none", withErrors.length ? "bad" : "ok"),
   ));
@@ -668,6 +678,25 @@ async function tabTrains(main) {
     { key: "scheduled", label: "Scheduled by", wrap: true, sort: (s) => s.scheduled.length, render: (s) => s.scheduled.join(", ") },
   ];
   section("Stations", "live · click a station to open it", table(r.stations, stationCols, { initialSort: { key: "name", dir: 1 }, selected: (s) => s.name === state.sel.station, onRow: (s) => { state.sel.station = state.sel.station === s.name ? null : s.name; renderTab(); }, expand: stationDetail }));
+
+  // ---- signals: problems first (invalid blocks, then Stop aspects); the full list is collapsed behind a toggle
+  const signals = r.signals ?? [];
+  if (signals.length) {
+    const problems = signals.filter((s) => !s.blockOk || s.aspect === "Stop");
+    const ASPECT_PILL = { Clear: "ok", Dock: "ok", Stop: "warn", None: null };
+    const signalCols = [
+      { key: "id", label: "Signal" },
+      { key: "kind", label: "Type" },
+      { key: "aspect", label: "Aspect", render: (s) => el("span", { class: "pill " + (ASPECT_PILL[s.aspect] ?? ""), text: s.aspect }) },
+      { key: "block", label: "Block", render: (s) => el("span", { class: s.blockOk ? null : "neg", text: s.block }) },
+      { key: "location", label: "Location" },
+    ];
+    const showAll = state.sel.allSignals === true;
+    const rows = showAll ? signals : problems;
+    const toggle = el("button", { type: "button", class: "ghost small", onclick: () => { state.sel.allSignals = !showAll; renderTab(); } }, showAll ? `show problems only (${problems.length})` : `show all ${signals.length}`);
+    section("Signals", problems.length ? `${problems.length} need attention · live` : "every block valid, nothing at stop · live",
+      el("div", {}, toggle, rows.length ? table(rows, signalCols, { initialSort: { key: "block", dir: 1 } }) : el("div", { class: "chart-empty", text: "No signal problems." })));
+  }
 }
 
 const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, trains: tabTrains, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };

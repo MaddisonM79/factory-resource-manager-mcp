@@ -40,22 +40,22 @@ service-auth policy. Nothing on the game machine is exposed to the internet.
 
 | tool | what it answers |
 |---|---|
-| `session_status` | Is the game up? Session info, players, UObject count |
-| `power_overview` | Per circuit: capacity, draw, headroom, battery, tripped fuses |
-| `factory_problems` | Idle / paused / low-efficiency machines, grouped by building + recipe |
+| `session_status` | Is the game up? Session info, players, UObject count vs capacity |
+| `power_overview` | Per circuit: capacity, draw, headroom, battery, tripped fuses, and its generators (fueled/dry, load %, empty water feeds, nuclear waste and warnings, shards/sloops); plus a map-wide roll-up by fuel |
+| `factory_problems` | Idle / paused / low-efficiency machines, grouped by building + recipe, with overclock / underclock counts and shards / sloops; `clock` filters on those instead |
 | `production_balance` | Item production vs consumption, deficits first |
 | `find_item` | Which containers hold an item, how much, where |
-| `logistics_status` | Trains with cargo, stations per platform, trucks, drones |
-| `site_status` | One row per site (spatial cluster, default 200 m): machines by state, MW, buildings, recipes |
-| `belt_load` | Belts by tier, dangling ends, belts too slow for the machine they feed or drain |
+| `logistics_status` | Trains with cargo, stations per platform, rail signals (aspect, block validity), trucks, drone ports with FRM's rate / round-trip / fuel telemetry |
+| `site_status` | One row per site (spatial cluster, default 200 m): machines by state, MW, buildings, recipes, overclocked / underclocked, shards / sloops |
+| `belt_load` | Belts by tier, dangling ends, belts too slow for the machine they feed or drain, and every Throughput Counter with measured items/min vs the belt's cap |
 | `pipe_load` | Pipes by tier, and every unconnected pipe end classified as phantom (touching a junction, pump, or machine but not joined) or open |
 | `station_throughput` | Per station and platform: mode, status, cargo, rates, trains scheduled / inbound / docked |
 | `sink_rates` | AWESOME Sink coupons, points/min, ETA to next coupon, sink buildings |
 | `depot_status` | Dimensional Depot per item: stock, capacity, full, fill rate, minutes to full, when it filled |
 | `emergency_reserve` | Dark-restart readiness: `*-EMERGENCY-RESERVE` switches (off, full bank behind them) and `*-TIE` switches (on), the circuit behind each reserve, issues, mode |
 | `battery_trend` | Battery % and power deltas per circuit over a window; windows beyond 24 h are served from D1 history |
-| `trend` | Any history series (power, site, gens, depot, prod, station, sinks) over a window, from D1. Same data as `/api/series/*` |
-| `frm_get` | Any of ~75 raw FRM read endpoints with `filter` / `fields` / `limit` / `offset` |
+| `trend` | Any history series (power, site, gens, depot, prod, station, sinks, drone, counter) over a window, from D1. Same data as `/api/series/*` |
+| `frm_get` | Any of the 94 raw FRM 1.5 read endpoints with `filter` / `fields` / `limit` / `offset` |
 | `set_enabled` | Toggle buildings by ID. Gated, off by default |
 | `frm_write` | Raw POST to any FRM write endpoint. Gated, off by default |
 
@@ -75,8 +75,26 @@ endpoint with `limit: 1` and compare keys.
 - `getProdStats`: `CurrentProd` / `CurrentConsumed` / `MaxProd` / `MaxConsumed`.
 - `getTrainStation.CargoInventory[]` is a list of freight platforms, each with
   its own `Inventory`, `LoadingMode`, `LoadingStatus`, `DockingStatus`.
-- `getBelts.ItemsPerMinute` is the tier cap, not live flow. `belt_load`
-  infers problems from the machine a belt connects to instead.
+- `getBelts.ItemsPerMinute` is the tier cap, not live flow. Measured flow
+  exists only where you build a Throughput Counter: `getThroughputCounter`
+  gives `CalculatedAverage` (items/min) and `Confidence` (0..100) per
+  counter, plus the belt's class and cap but not its ID, so `belt_load`
+  matches counters to belts by position. Everywhere else it infers problems
+  from the machine a belt connects to.
+- `getTrainSignals.Aspect` is mislabelled in FRM 1.5.3: the aspect index is
+  looked up in the block-validation enum, so `Valid` means Clear,
+  `No Exit Signal` means Stop, `Contains Loop` means Dock. `trains.ts`
+  maps both spellings. `BlockValid` is correct.
+- `getDroneStation` carries FRM's own transport statistics per port:
+  averaged in/out items per minute, estimated total rate, average / median /
+  latest round trip, items per trip, and the active fuel's cost per trip.
+  `logistics_status` and the `drone` history series read them.
+- `getGenerators`: `LoadPercentage`, `Supplement.PercentFull` (water for
+  coal and nuclear), `WasteInventory` and `NuclearWarning` (nuclear),
+  `PowerShards`, `Somersloops`. `getFactory`: `ManuSpeed` is the clock in
+  percent, `PowerShards`, `Somersloops`.
+- `getAll` still registers in FRM 1.5 but is retired and answers with an
+  error object, so it is not in the registry.
 - `getGenerators`: `FuelAmount` (number), `CanStart`, `ProductionCapacity`.
   `AvailableFuel` lists the fuel types a generator accepts, not its stock.
   The HUB burners are `Build_GeneratorIntegratedBiomass_C`.
@@ -95,18 +113,21 @@ sample of its own. The KV ring is the live view; D1 is history.
 ### History (D1)
 
 Every 5-minute tick also fetches `getFactory`, `getGenerators`,
-`getProdStats`, `getTrainStation`, and `getTrains`, and writes one D1 batch:
+`getProdStats`, `getTrainStation`, `getTrains`, `getDroneStation`, and
+`getThroughputCounter`, and writes one D1 batch:
 
 | table | one row per | notes |
 |---|---|---|
 | `power_samples` | circuit group | capacity, production, draw, battery, fuse |
 | `site_samples` | spatial cluster of machines (200 m) | counts by state, MW, productivity, cluster center |
-| `gen_samples` | (fuel type, generator field) | plus a map-wide row per fuel type with `field_id = 0` |
+| `gen_samples` | (fuel type, generator field) | plus a map-wide row per fuel type with `field_id = 0`; `load_pct`, nuclear `waste` |
 | `depot_samples` | depot item | stock, capacity, full |
 | `prod_samples` | item | straight from `getProdStats` |
 | `station_samples` | freight platform | mode, cargo, rate, docked train, inbound count |
 | `train_visits` | dock/undock | opened when a train docks, closed when it leaves; `delta_cargo` = platform stock at arrival minus at departure |
 | `sink_samples` | sink | coupons, points to next, points/min |
+| `drone_samples` | drone port | status, pairing, in/out items per min, est. rate, latest round trip, items per trip, fuel, stocks |
+| `counter_samples` | throughput counter | belt class and cap, measured items/min, confidence |
 | `gap_samples` | unreachable tick | the only row written that tick |
 
 Every sample row carries `ts`, `session` (FRM `SessionName`), `playtime`, and
@@ -138,7 +159,7 @@ windows of ≤ 7 days inside raw retention, hourly otherwise.
 ```
 GET /api/status                        live getSessionInfo + getPlayer, plus sampler staleness
 GET /api/emergency                     live dark-restart readiness (?min_charge_pct=95)
-GET /api/trains                        live trains (timetable, cargo, errors) and stations (platforms, docked, inbound, scheduled)
+GET /api/trains                        live trains (timetable, cargo, errors), stations (platforms, docked, inbound, scheduled), signals (aspect, block validity)
 GET /api/latest                        newest tick from every table, sites/fields resolved to names
 GET /api/live                          KV ring + staleness_seconds (?minutes=)
 GET /api/series/power                  ?group= for one circuit group
@@ -148,6 +169,8 @@ GET /api/series/depot/:item
 GET /api/series/prod/:item
 GET /api/series/station/:name
 GET /api/series/sinks
+GET /api/series/drone/:station           /api/series/drone = every port
+GET /api/series/counter/:id              FRM counter ID (or name); /api/series/counter = every counter
 GET /api/visits?station=&train=&from=&to=
 GET /api/lookup/sites                  PATCH /api/lookup/sites/:id
 GET /api/lookup/fields                 PATCH /api/lookup/fields/:id
@@ -164,12 +187,14 @@ Nothing under `/api` can reach the FRM tunnel.
 no build step. It shows whether the game answered just now (`/api/status`
 calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
 reaches the tunnel), then tabs for power per circuit group, item production
-vs consumption, sites by machine state, generator fields, the depot, and the
+vs consumption, sites by machine state, generator fields (with load % and
+nuclear waste), the depot, and the
 sinks, an Emergency tab for the dark-restart reserves, and a Trains tab
 (every train with its timetable, cargo and errors; every station with its
 platforms, what is docked or inbound and which trains schedule it; the dock
 history from `train_visits` with dwell and cargo moved; a station's transfer
-rate over time). Every chart takes the same time range (1 h to 30 d) and a Local / UTC
+rate over time; every signal at Stop or on an invalid block, with the full
+list behind a toggle). Every chart takes the same time range (1 h to 30 d) and a Local / UTC
 toggle in the header; outages are shaded, save reloads are marked with the
 session name, and nothing is interpolated across either. Tables come from
 `/api/latest`, the newest tick from every history table with sites and

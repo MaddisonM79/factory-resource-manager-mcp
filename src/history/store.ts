@@ -12,7 +12,7 @@ type Row = Record<string, unknown>;
 const MAX_PARAMS = 100;
 const KEY_COLS = ["ts", "session", "playtime", "epoch"] as const;
 
-const RAW_TABLES = ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples"] as const;
+const RAW_TABLES = ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples", "drone_samples", "counter_samples"] as const;
 
 // ---------------------------------------------------------------- writes
 
@@ -43,6 +43,8 @@ export async function writeTick(db: D1Database, t: Tick): Promise<void> {
     ...insertStatements(db, "prod_samples", k, t.prod),
     ...insertStatements(db, "station_samples", k, t.station),
     ...insertStatements(db, "sink_samples", k, t.sink),
+    ...insertStatements(db, "drone_samples", k, t.drone),
+    ...insertStatements(db, "counter_samples", k, t.counter),
     ...insertStatements(db, "train_visits", k, t.visitOpens.map((v) => ({ ...v, departed_ts: null, delta_cargo: null }))),
     ...t.visitCloses.map((v) =>
       db.prepare("UPDATE train_visits SET departed_ts = ?, delta_cargo = ? WHERE station = ? AND train = ? AND arrived_ts = ? AND departed_ts IS NULL")
@@ -82,8 +84,8 @@ const ROLLUPS: { table: string; hourly: string; cols: string; select: string; gr
   {
     // field_id: 0 = map-wide, -1 = spatial cluster (resolved on read by center). NULL would defeat the UNIQUE key.
     table: "gen_samples", hourly: "hourly_gen",
-    cols: "fuel_type, field_id, cell_x, cell_y, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw",
-    select: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0), AVG(center_x), AVG(center_y), AVG(center_z), AVG(total), AVG(fueled), AVG(dry), MIN(dry), MAX(dry), AVG(capacity_mw)",
+    cols: "fuel_type, field_id, cell_x, cell_y, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw, load_pct, waste, waste_max",
+    select: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0), AVG(center_x), AVG(center_y), AVG(center_z), AVG(total), AVG(fueled), AVG(dry), MIN(dry), MAX(dry), AVG(capacity_mw), AVG(load_pct), AVG(waste), MAX(waste)",
     group: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0)",
   },
   {
@@ -109,6 +111,18 @@ const ROLLUPS: { table: string; hourly: string; cols: string; select: string; gr
     cols: "sink, coupons, coupons_max, points_to_next, points_per_min",
     select: "sink, AVG(coupons), MAX(coupons), AVG(points_to_next), AVG(points_per_min)",
     group: "sink",
+  },
+  {
+    table: "drone_samples", hourly: "hourly_drone",
+    cols: "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, fuel_min, input_stock, output_stock",
+    select: "station, MAX(paired), MAX(status), AVG(in_per_min), AVG(out_per_min), AVG(est_per_min), AVG(round_trip_s), AVG(trip_in), AVG(trip_out), AVG(fuel), MIN(fuel), AVG(input_stock), AVG(output_stock)",
+    group: "station",
+  },
+  {
+    table: "counter_samples", hourly: "hourly_counter",
+    cols: "counter_id, name, belt, cap_per_min, items_per_min, items_min, items_max, confidence",
+    select: "counter_id, MAX(name), MAX(belt), AVG(cap_per_min), AVG(items_per_min), MIN(items_per_min), MAX(items_per_min), AVG(confidence)",
+    group: "counter_id",
   },
 ];
 
@@ -146,7 +160,7 @@ export interface Series {
   gaps: Gap[];
 }
 
-export type SeriesKind = "power" | "site" | "gens" | "depot" | "prod" | "station" | "sinks";
+export type SeriesKind = "power" | "site" | "gens" | "depot" | "prod" | "station" | "sinks" | "drone" | "counter";
 
 export interface SeriesQuery { kind: SeriesKind; from: number; to: number; res: Res; key?: string | null }
 
@@ -227,6 +241,8 @@ export const SERIES_KEY_COLS: Record<SeriesKind, string[]> = {
   prod: ["item"],
   station: ["station", "platform"],
   sinks: ["sink"],
+  drone: ["station"],
+  counter: ["counter_id"],
 };
 
 export const seriesKeyOf = (kind: SeriesKind, r: Row): string => SERIES_KEY_COLS[kind].map((c) => String(r[c] ?? "")).join("|");
@@ -264,6 +280,8 @@ export interface Latest {
   prod: Row[];
   stations: Row[];
   sinks: Row[];
+  drones: Row[];
+  counters: Row[];
 }
 
 /** Every table's rows for the newest good tick, with sites and generator fields resolved to lookup names. */
@@ -271,18 +289,20 @@ export async function readLatest(db: D1Database): Promise<Latest> {
   const head = await db.prepare("SELECT ts, epoch, session, playtime FROM power_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; epoch: number; session: string; playtime: number }>();
   const gapRow = await db.prepare("SELECT ts, reason FROM gap_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; reason: string }>();
   const gap = gapRow && (!head || gapRow.ts > head.ts) ? gapRow : null;
-  if (!head) return { ts: null, epoch: null, session: null, playtime: null, gap, power: [], sites: [], gens: [], depot: [], prod: [], stations: [], sinks: [] };
+  if (!head) return { ts: null, epoch: null, session: null, playtime: null, gap, power: [], sites: [], gens: [], depot: [], prod: [], stations: [], sinks: [], drones: [], counters: [] };
   const ts = head.ts;
   const at = (sql: string) => all(db, sql, ts);
-  const [siteLookup, fieldLookup, power, sites, gens, depot, prod, stations, sinks] = await Promise.all([
+  const [siteLookup, fieldLookup, power, sites, gens, depot, prod, stations, sinks, drones, counters] = await Promise.all([
     listLookup(db, "sites"), listLookup(db, "fields"),
     at("SELECT circuit_group, capacity_mw, production_mw, consumed_mw, max_consumed_mw, battery_pct, battery_in_mw, battery_out_mw, fuse_tripped FROM power_samples WHERE ts = ? ORDER BY circuit_group"),
     at("SELECT site_id, center_x, center_y, center_z, machines, running, blocked, starved, unpowered, paused, unconfigured, idle, mw_draw, mw_max, avg_productivity FROM site_samples WHERE ts = ? ORDER BY machines DESC"),
-    at("SELECT fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw FROM gen_samples WHERE ts = ? ORDER BY fuel_type, field_id"),
+    at("SELECT fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw, load_pct, waste FROM gen_samples WHERE ts = ? ORDER BY fuel_type, field_id"),
     at("SELECT item, stock, capacity, is_full FROM depot_samples WHERE ts = ? ORDER BY item"),
     at("SELECT item, produced_per_min, consumed_per_min, max_prod, max_cons FROM prod_samples WHERE ts = ? ORDER BY item"),
     at("SELECT station, platform, mode, cargo, transfer_rate, docked_train, inbound FROM station_samples WHERE ts = ? ORDER BY station, platform"),
     at("SELECT sink, coupons, points_to_next, points_per_min FROM sink_samples WHERE ts = ? ORDER BY sink"),
+    at("SELECT station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, input_stock, output_stock FROM drone_samples WHERE ts = ? ORDER BY station"),
+    at("SELECT counter_id, name, belt, cap_per_min, items_per_min, confidence FROM counter_samples WHERE ts = ? ORDER BY name, counter_id"),
   ]);
   const nameOf = (lookup: Lookup[], id: unknown) => lookup.find((l) => l.id === Number(id))?.name ?? null;
   return {
@@ -296,7 +316,7 @@ export async function readLatest(db: D1Database): Promise<Latest> {
       const field_id = r.field_id == null ? resolveCenter({ x: Number(r.center_x), y: Number(r.center_y) }, fieldLookup) : Number(r.field_id);
       return { ...r, field_id, name: field_id === 0 ? "map-wide" : nameOf(fieldLookup, field_id) };
     }),
-    depot, prod, stations, sinks,
+    depot, prod, stations, sinks, drones, counters,
   };
 }
 
@@ -332,8 +352,8 @@ export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series
       break;
     }
     case "gens": {
-      const rawCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw";
-      const hourlyCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw";
+      const rawCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw, load_pct, waste";
+      const hourlyCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw, load_pct, waste, waste_max";
       if (q.key == null || q.key === "") {
         rows = await all(db, sql(res, "gen_samples", "hourly_gen", rawCols, hourlyCols, "AND field_id = 0", "fuel_type"), from, to);
         break;
@@ -375,6 +395,21 @@ export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series
         "sink, coupons, points_to_next, points_per_min", "sink, coupons, coupons_max, points_to_next, points_per_min",
         "", "sink"), from, to);
       break;
+    case "drone": {
+      const cols = "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, input_stock, output_stock";
+      const hourlyCols = "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, fuel_min, input_stock, output_stock";
+      const one = q.key != null && q.key !== "" && q.key !== "all";
+      rows = await all(db, sql(res, "drone_samples", "hourly_drone", cols, hourlyCols, one ? "AND station = ? COLLATE NOCASE" : "", "station"), from, to, ...(one ? [q.key] : []));
+      break;
+    }
+    case "counter": {
+      const cols = "counter_id, name, belt, cap_per_min, items_per_min, confidence";
+      const hourlyCols = "counter_id, name, belt, cap_per_min, items_per_min, items_min, items_max, confidence";
+      const one = q.key != null && q.key !== "" && q.key !== "all";
+      // Counters have no player-facing name, so the key is FRM's ID; a name match is accepted too.
+      rows = await all(db, sql(res, "counter_samples", "hourly_counter", cols, hourlyCols, one ? "AND (counter_id = ? OR name = ? COLLATE NOCASE)" : "", "counter_id"), from, to, ...(one ? [q.key, q.key] : []));
+      break;
+    }
   }
   return toSeries(rows, await gapsP, res);
 }

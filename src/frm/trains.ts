@@ -1,6 +1,7 @@
 // Rail network view: every train with its timetable, position and cargo, every station with its
-// platforms, what is docked or inbound, and which trains have it on their schedule. Live from
-// getTrains + getTrainStation; dock history (dwell, cargo moved) comes from train_visits in D1.
+// platforms, what is docked or inbound, and which trains have it on their schedule, plus every
+// signal with its aspect and block validity. Live from getTrains + getTrainStation (+ getTrainSignals);
+// dock history (dwell, cargo moved) comes from train_visits in D1.
 
 import { asArray, num, loc } from "./client.ts";
 
@@ -51,10 +52,52 @@ export interface StationRow {
   fuseTripped: boolean;
 }
 
+export interface SignalRow {
+  id: string;
+  /** block | path, from the class name */
+  kind: "block" | "path";
+  /** None | Clear | Stop | Dock */
+  aspect: string;
+  /** Valid | Unvalidated | No Exit Signal | Contains Loop | Contains Mixed Entry Signals | Contain Station */
+  block: string;
+  blockOk: boolean;
+  location: string;
+}
+
 export interface TrainsReport {
-  counts: { trains: number; moving: number; docked: number; stopped: number; derailed: number; stations: number; platforms: number };
+  counts: {
+    trains: number; moving: number; docked: number; stopped: number; derailed: number; stations: number; platforms: number;
+    signals: number; signalsStop: number; invalidBlocks: number;
+  };
   trains: TrainRow[];
   stations: StationRow[];
+  signals: SignalRow[];
+}
+
+/**
+ * FRM 1.5 labels a signal's Aspect with the ERailroadBlockValidation enum's display names by mistake
+ * (the aspect index is looked up in the wrong enum), so "Valid" means Clear and "No Exit Signal" means
+ * Stop. Both the mislabelled and the correct names are accepted, so a fixed FRM keeps working.
+ */
+const ASPECT_BY_MISLABEL: Record<string, string> = { Unvalidated: "None", Valid: "Clear", "No Exit Signal": "Stop", "Contains Loop": "Dock" };
+const ASPECTS = new Set(["None", "Clear", "Stop", "Dock"]);
+export function signalAspect(raw: unknown): string {
+  const s = String(raw ?? "");
+  if (ASPECTS.has(s)) return s;
+  return ASPECT_BY_MISLABEL[s] ?? s;
+}
+
+export function signalRows(signalsRaw: unknown): SignalRow[] {
+  return asArray(signalsRaw).map((s) => {
+    const block = String(s.BlockValid ?? "");
+    return {
+      id: String(s.ID ?? ""),
+      kind: /path/i.test(String(s.ClassName ?? s.Name ?? "")) ? "path" : "block",
+      aspect: signalAspect(s.Aspect),
+      block, blockOk: block === "Valid",
+      location: loc(s),
+    };
+  });
 }
 
 const DOCKED = /docked|docking|loading|unloading/i;
@@ -123,12 +166,19 @@ export function stationRows(stationsRaw: unknown, trains: TrainRow[]): StationRo
   });
 }
 
-export function trainsReport(trainsRaw: unknown, stationsRaw: unknown): TrainsReport {
+export function trainsReport(trainsRaw: unknown, stationsRaw: unknown, signalsRaw: unknown = null): TrainsReport {
   const trains = trainRows(trainsRaw).sort((a, b) => a.name.localeCompare(b.name));
   const stations = stationRows(stationsRaw, trains).sort((a, b) => a.name.localeCompare(b.name));
+  // Problems first: invalid blocks, then Stop aspects, then the rest.
+  const rank = (s: SignalRow) => (s.blockOk ? 0 : 2) + (s.aspect === "Stop" ? 1 : 0);
+  const signals = signalRows(signalsRaw).sort((a, b) => rank(b) - rank(a) || a.id.localeCompare(b.id));
   const by = (st: TrainRow["state"]) => trains.filter((t) => t.state === st).length;
   return {
-    counts: { trains: trains.length, moving: by("moving"), docked: by("docked"), stopped: by("stopped"), derailed: by("derailed"), stations: stations.length, platforms: stations.reduce((n, s) => n + s.platforms.length, 0) },
-    trains, stations,
+    counts: {
+      trains: trains.length, moving: by("moving"), docked: by("docked"), stopped: by("stopped"), derailed: by("derailed"),
+      stations: stations.length, platforms: stations.reduce((n, s) => n + s.platforms.length, 0),
+      signals: signals.length, signalsStop: signals.filter((s) => s.aspect === "Stop").length, invalidBlocks: signals.filter((s) => !s.blockOk).length,
+    },
+    trains, stations, signals,
   };
 }
