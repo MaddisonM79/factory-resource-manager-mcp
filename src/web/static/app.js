@@ -742,14 +742,21 @@ async function refreshAll() {
 
 // ---------------------------------------------------------------- auth
 
-function showLogin() { $("#login").hidden = false; $("#logout").hidden = true; }
-function hideLogin() { $("#login").hidden = true; $("#logout").hidden = false; }
+// The <hanko-auth> element starts WebAuthn conditional mediation (the browser's passkey
+// autofill prompt) the moment it exists, even inside a hidden overlay. So it is only created
+// when a login is actually needed and removed again once the session is good; a page refresh
+// with a valid cookie never instantiates it and never asks for the passkey.
+function showLogin() {
+  const mount = $("#hanko-mount");
+  if (!mount.querySelector("hanko-auth")) mount.replaceChildren(el("hanko-auth"));
+  $("#login").hidden = false; $("#logout").hidden = true;
+}
+function hideLogin() { $("#hanko-mount").replaceChildren(); $("#login").hidden = true; $("#logout").hidden = false; }
 
 async function bootAuth() {
   const { hanko_api } = await api("/config");
   const { hanko } = await register(hanko_api, { cookieSameSite: "lax" });
   state.hanko = hanko;
-  $("#hanko-mount").replaceChildren(el("hanko-auth"));
   hanko.onSessionCreated(() => { hideLogin(); refreshAll(); });
   hanko.onSessionExpired(() => showLogin());
   hanko.onUserLoggedOut(() => showLogin());
