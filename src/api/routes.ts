@@ -5,7 +5,7 @@
 // come from a live answer rather than from sampler staleness.
 
 import { Hono } from "hono";
-import { type Env, readSamples, frmGet, asArray, loc } from "../frm/client.ts";
+import { type Env, readSamples, frmGet, asArray, loc, num } from "../frm/client.ts";
 import { RAW_RETENTION_SECONDS, pickRes, type Res } from "../history/history.ts";
 import { emergencyReport } from "../frm/emergency.ts";
 import { trainsReport } from "../frm/trains.ts";
@@ -49,11 +49,14 @@ api.onError(apiError);
 api.get("/api/status", async (c) => {
   const now = Date.now();
   const ringP = readSamples(c.env).catch(() => []);
-  let session: any = null, players: any[] = [], error: string | null = null;
+  let session: any = null, players: any[] = [], uobjects: { count: number; capacity: number; used_pct: number | null } | null = null, error: string | null = null;
   try {
-    const [s, p] = await Promise.all([frmGet(c.env, "getSessionInfo"), frmGet(c.env, "getPlayer").catch(() => [])]);
+    const [s, p, u] = await Promise.all([frmGet(c.env, "getSessionInfo"), frmGet(c.env, "getPlayer").catch(() => []), frmGet(c.env, "getUObjectCount").catch(() => null)]);
     session = s;
     players = asArray(p).map((x) => ({ name: x.PlayerName ?? x.Name, online: x.Online, location: loc(x), health: x.PlayerHP }));
+    // The engine's object pool: the game crashes when it fills, so the header keeps an eye on it.
+    const uo: any = asArray(u)[0];
+    if (uo) { const count = num(uo.UObjectCount), capacity = num(uo.UObjectCapacity); uobjects = { count, capacity, used_pct: capacity ? Math.round((count / capacity) * 1000) / 10 : null }; }
   } catch (e: any) {
     error = String(e?.message ?? e);
   }
@@ -69,6 +72,7 @@ api.get("/api/status", async (c) => {
       hours: session.Hours, minutes: session.Minutes,
     },
     players,
+    uobjects,
     sampler: {
       latest_ts: latest ? Math.floor(latest.t / 1000) : null,
       staleness_seconds: latest ? Math.floor((now - latest.t) / 1000) : null,

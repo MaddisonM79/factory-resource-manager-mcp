@@ -245,6 +245,7 @@ function renderStatus() {
     online.length ? `${online.length} online: ${online.join(", ")}` : "nobody online",
     sess.play_text ? `play ${sess.play_text}` : null,
     sess.days != null ? `day ${sess.days} ${sess.is_day ? "☀" : "☾"} ${String(sess.hours ?? 0).padStart(2, "0")}:${String(sess.minutes ?? 0).padStart(2, "0")}` : null,
+    s.uobjects ? `objects ${fmtNum(s.uobjects.count)} (${fmtPct(s.uobjects.used_pct)} of pool)` : null,
     `sampler ${fmtAge(age)}${samp.gap ? " (gap)" : ""}`,
   ].filter(Boolean).join(" · ");
 }
@@ -274,6 +275,7 @@ async function tabOverview(main) {
   const tile = (k, v, unit, d, cls) => el("div", { class: "tile" }, el("div", { class: "k", text: k }), el("div", { class: "v" }, v, unit ? el("small", { text: unit }) : null), d ? el("div", { class: "d " + (cls ?? ""), text: d }) : null);
   main.append(el("div", { class: "tiles" },
     tile("Game", S.reachable ? (S.session?.paused ? "Paused" : "Running") : "Down", "", S.reachable ? `${(S.players ?? []).filter((p) => p.online).length} online` : S.error?.slice(0, 60), S.reachable ? "ok" : "bad"),
+    tile("Objects", S.uobjects ? fmtNum(S.uobjects.count) : "–", "", S.uobjects ? `${fmtPct(S.uobjects.used_pct)} of the engine's ${fmtNum(S.uobjects.capacity)} pool` : "no count from FRM", S.uobjects && S.uobjects.used_pct >= 90 ? "bad" : S.uobjects && S.uobjects.used_pct >= 75 ? "warn" : null),
     tile("Grid draw", fmtMW(cons), "", `of ${fmtMW(cap)} capacity · peak ${fmtMW(maxc)}`, maxc > cap ? "bad" : null),
     tile("Headroom", fmtMW(cap - cons), "", cap ? `${fmtPct(100 * (cap - cons) / cap)} free` : "no capacity", cap - maxc < 0 ? "bad" : null),
     tile("Battery", batt.length ? fmtPct(Math.min(...batt)) : "none", "", batt.length ? `${batt.length} circuit${batt.length > 1 ? "s" : ""} with storage` : ""),

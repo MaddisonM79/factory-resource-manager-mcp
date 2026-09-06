@@ -161,7 +161,7 @@ default the last 24 h) and optional `res=raw|hourly`; when omitted, raw for
 windows of ≤ 7 days inside raw retention, hourly otherwise.
 
 ```
-GET /api/status                        live getSessionInfo + getPlayer, plus sampler staleness
+GET /api/status                        live getSessionInfo + getPlayer + getUObjectCount, plus sampler staleness
 GET /api/emergency                     live dark-restart readiness (?min_charge_pct=95)
 GET /api/trains                        live trains (timetable, cargo, errors), stations (platforms, docked, inbound, scheduled), signals (aspect, block validity)
 GET /api/latest                        newest tick from every table, sites/fields resolved to names
