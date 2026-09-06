@@ -39,11 +39,12 @@ export class FakeD1 {
     for (const f of readdirSync(dir).filter((f) => f.endsWith(".sql")).sort()) this.db.exec(readFileSync(dir + f, "utf8"));
   }
   prepare(sql: string) { return new Stmt(this.db, sql); }
+  /** Like D1: SELECTs in a batch come back with their rows, everything else with run() metadata. */
   async batch(stmts: Stmt[]) {
     this.db.exec("BEGIN");
     try {
       const out = [];
-      for (const s of stmts) out.push(await s.run());
+      for (const s of stmts) out.push(/^\s*SELECT/i.test((s as any).sql) ? await s.all() : await s.run());
       this.db.exec("COMMIT");
       return out;
     } catch (e) {

@@ -182,3 +182,18 @@ hanko-auth { --brand-color: var(--accent); --font-family: system-ui, -apple-syst
 .timetable li.cur { font-weight: 600; }
 ul.plain { margin: 0; padding-left: 18px; }
 ul.plain li { padding: 2px 0; }
+
+/* Admin tab */
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 10px; font-size: 13px; }
+.kv dt { color: var(--ink-2); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+button.danger { border-color: var(--critical); color: var(--critical); background: transparent; }
+button.danger:hover { background: color-mix(in srgb, var(--critical) 12%, transparent); }
+button.small { padding: 2px 8px; font-size: 12px; }
+input.inline { font: inherit; color: inherit; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 3px 6px; width: 110px; }
+input.inline.name { width: 100%; min-width: 160px; }
+.lookup { display: grid; gap: 4px; }
+.lookup-row { display: grid; grid-template-columns: 40px 1fr 110px 110px 110px auto auto; gap: 6px; align-items: center; }
+.lookup-row.head { color: var(--ink-2); font-size: 12px; }
+.lookup-row.add { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--grid); grid-template-columns: 40px 1fr auto; }
+@media (max-width: 900px) { .lookup-row { grid-template-columns: 40px 1fr; } .lookup-row.head { display: none; } }

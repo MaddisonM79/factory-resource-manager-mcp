@@ -6,7 +6,7 @@ import { register } from "/vendor/hanko-elements.js";
 // ---------------------------------------------------------------- state
 
 const RANGES = [["1h", 3600], ["6h", 6 * 3600], ["24h", 24 * 3600], ["7d", 7 * 86400], ["30d", 30 * 86400]];
-const TABS = [["overview", "Overview"], ["power", "Power"], ["emergency", "Emergency"], ["trains", "Trains"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"]];
+const TABS = [["overview", "Overview"], ["power", "Power"], ["emergency", "Emergency"], ["trains", "Trains"], ["production", "Production"], ["sites", "Sites"], ["gens", "Generators"], ["depot", "Depot"], ["sinks", "Sinks"], ["admin", "Admin"]];
 const SLOTS = ["--s1", "--s2", "--s3", "--s4", "--s5", "--s6", "--s7", "--s8"];
 const STATES = ["running", "blocked", "starved", "unpowered", "paused", "unconfigured", "idle"];
 
@@ -701,7 +701,187 @@ async function tabTrains(main) {
   }
 }
 
-const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, trains: tabTrains, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks };
+// ---------------------------------------------------------------- admin
+
+/** A card that loads its own endpoint, so a slow origin check never holds up the D1 or KV sections. */
+function lazyCard(title, hint, load) {
+  const body = el("div", { class: "chart-empty", text: "Loading…" });
+  const card = el("div", { class: "card" }, el("h2", {}, title, el("span", { class: "hint", text: hint })), body);
+  const run = async () => {
+    body.replaceChildren(el("div", { class: "chart-empty", text: "Loading…" }));
+    try { const node = await load(); body.replaceChildren(node); }
+    catch (e) { if (e instanceof LoginRequired) return showLogin(); body.replaceChildren(el("div", { class: "chart-empty error", text: String(e.message) })); }
+  };
+  run();
+  return { card, reload: run };
+}
+const kv = (pairs) => el("dl", { class: "kv" }, pairs.filter((p) => p).flatMap(([k, v]) => [el("dt", { text: k }), el("dd", {}, v ?? "–")]));
+const pill = (text, cls) => el("span", { class: "pill " + (cls ?? ""), text });
+const confirmThen = async (message, fn, after) => { if (!window.confirm(message)) return; try { await fn(); } catch (e) { window.alert(e.message); } await after(); };
+const del = (path) => api(path, { method: "DELETE" });
+const send = (path, method, body) => api(path, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+const fmtTs = (ts) => (ts == null ? "–" : fmtTime(ts, { year: "numeric" }));
+const fmtBytes = (n) => (n == null ? "–" : n >= 1e6 ? fmtNum(n / 1e6, 1) + " M" : n >= 1e3 ? fmtNum(n / 1e3, 1) + " k" : fmtNum(n));
+
+async function tabAdmin(main) {
+  const tiles = el("div", { class: "tiles" });
+  const grid = el("div", { class: "grid wide" });
+  main.append(tiles, grid);
+  const tile = (k, v, d, cls) => el("div", { class: "tile" }, el("div", { class: "k", text: k }), el("div", { class: "v", text: String(v) }), d ? el("div", { class: "d " + (cls ?? ""), text: d }) : null);
+
+  // ---- origin and tunnel
+  const origin = lazyCard("Origin and tunnel", "live: Access → tunnel → FRM", async () => {
+    const r = await api("/api/admin/origin");
+    tiles.replaceChildren(
+      tile("Origin", r.reachable ? "Up" : "Down", r.reachable ? `${fmtNum(r.latency_ms)} ms round trip` : (r.error ?? "").slice(0, 70), r.reachable ? "ok" : "bad"),
+      tile("FRM", r.frm.version ?? "–", r.frm.mods.length ? `${r.frm.mods.length} mods loaded` : (r.reachable ? "mod list unavailable" : "game down")),
+      tile("Save", r.session?.name ?? "–", r.session ? `${r.session.paused ? "paused" : "running"} · day ${r.session.days} · ${r.session.play_text}` : ""),
+    );
+    const cols = [
+      { key: "name", label: "Mod" }, { key: "smr", label: "SMR id" }, { key: "version", label: "Version" }, { key: "author", label: "Author" },
+      { key: "requiredOnRemote", label: "Clients need it", render: (m) => (m.requiredOnRemote ? "yes" : "") },
+    ];
+    return el("div", {},
+      kv([["Reachable", pill(r.reachable ? "yes" : "no", r.reachable ? "ok" : "bad")], ["Latency", `${fmtNum(r.latency_ms)} ms`], r.status ? ["HTTP status", String(r.status)] : null, r.error ? ["Error", el("span", { class: "neg", text: r.error })] : null, ["Checked", fmtTs(r.now)]]),
+      r.frm.mods.length ? table(r.frm.mods, cols, { initialSort: { key: "name", dir: 1 } }) : null);
+  });
+  grid.append(origin.card);
+
+  // ---- system
+  const system = lazyCard("Worker configuration", "vars and gates", async () => {
+    const r = await api("/api/admin/system");
+    const cfg = r.config;
+    return kv([
+      ["MCP server", r.server_version],
+      ["FRM origin", cfg.frm_base_url],
+      ["MCP hosts", cfg.mcp_hosts.join(", ")],
+      ["Dashboard host", cfg.dash_host],
+      ["Hanko", cfg.hanko_api_url],
+      ["Dashboard allow-list", cfg.allowed_emails.join(", ") || "(empty: nobody can sign in)"],
+      ["Access service token", pill(cfg.access_token_set ? "set" : "missing", cfg.access_token_set ? "ok" : "bad")],
+      ["Write tools", pill(cfg.write_enabled ? "ENABLED" : "disabled", cfg.write_enabled ? "warn" : "ok")],
+      ["FRM API key", pill(cfg.api_key_set ? "set" : "not set", cfg.api_key_set ? "ok" : null)],
+      ["Raw retention", `${fmtNum(r.retention.raw_seconds / 86400)} days · KV ring ${r.retention.ring_hours} h`],
+    ]);
+  });
+  grid.append(system.card);
+
+  // ---- sampler and history
+  const sampler = lazyCard("Sampler and history", "KV state, D1 tables, epochs, gaps, rollup", async () => {
+    const r = await api("/api/admin/sampler");
+    const st = r.state, ring = r.ring, roll = r.rollup;
+    const behind = roll.raw_rows_past_cutoff > 0;
+    const tableCols = [
+      { key: "table", label: "Table" }, { key: "rows", label: "Rows", num: true, render: (t) => fmtBytes(t.rows) },
+      { key: "oldest", label: "Oldest", num: true, render: (t) => fmtTs(t.oldest) }, { key: "newest", label: "Newest", num: true, render: (t) => fmtTs(t.newest) },
+    ];
+    const epochCols = [
+      { key: "epoch", label: "Epoch", num: true }, { key: "session", label: "Session" },
+      { key: "first_ts", label: "First", num: true, render: (e) => fmtTs(e.first_ts) }, { key: "last_ts", label: "Last", num: true, render: (e) => fmtTs(e.last_ts) },
+      { key: "ticks", label: "Ticks", num: true }, { key: "gaps", label: "Gaps", num: true, render: (e) => el("span", { class: e.gaps ? "neg" : null, text: fmtNum(e.gaps) }) },
+    ];
+    const gapCols = [{ key: "ts", label: "When", num: true, render: (g) => fmtTs(g.ts) }, { key: "epoch", label: "Epoch", num: true }, { key: "reason", label: "Reason", wrap: true }];
+    return el("div", {},
+      el("div", { class: "tiles" },
+        tile("Last tick", ring.newest ? fmtAge(ring.staleness_seconds) : "–", ring.latest_is_gap ? "was a gap" : (ring.newest ? "good sample" : "no samples"), ring.latest_is_gap ? "bad" : (ring.staleness_seconds > 900 ? "bad" : "ok")),
+        tile("Epoch", st.epoch, st.session ? `${st.session} · play ${fmtDur(st.playtime)}` : "no session yet"),
+        tile("KV ring", ring.size, ring.oldest ? `since ${fmtTs(ring.oldest)} · ${ring.gaps} gap${ring.gaps === 1 ? "" : "s"}` : "empty"),
+        tile("Open visits", st.visits, st.lastGood ? "last tick was good" : "last tick was a gap", st.lastGood ? "ok" : "bad"),
+        tile("Rollup", roll.last_run ? fmtAge(r.now - roll.last_run.at) : "never", behind ? `${fmtNum(roll.raw_rows_past_cutoff)} raw rows past the cutoff` : "raw rows within retention", behind ? "bad" : "ok"),
+      ),
+      kv([["Raw cutoff", fmtTs(roll.cutoff)], ["Oldest raw tick", fmtTs(roll.oldest_raw_ts)], ["Newest hourly bucket", fmtTs(roll.newest_hourly_bucket)], ["Lookups seeded", st.seeded ? "yes" : "no (next live tick fills blank rows)"]]),
+      el("h3", { text: "D1 tables" }), table(r.tables, tableCols, { initialSort: { key: "table", dir: 1 } }),
+      el("h3", { text: "Epochs" }), r.epochs.length ? table(r.epochs, epochCols, { initialSort: { key: "epoch", dir: -1 } }) : el("p", { class: "muted small", text: "no ticks yet" }),
+      el("h3", { text: `Recent gaps (${r.gaps.length})` }), r.gaps.length ? table(r.gaps, gapCols, { initialSort: { key: "ts", dir: -1 } }) : el("p", { class: "muted small", text: "none recorded" }));
+  });
+  grid.append(sampler.card);
+
+  // ---- auth and connectors
+  const oauth = lazyCard("Connectors (OAuth)", "clients, grants, live tokens · MCP host", async () => {
+    const r = await api("/api/admin/oauth");
+    const me = await api("/api/me").catch(() => null);
+    const clientCols = [
+      { key: "clientName", label: "Client", render: (c) => c.clientName ?? el("span", { class: "muted", text: "(unnamed)" }) },
+      { key: "clientId", label: "Id" },
+      { key: "registrationDate", label: "Registered", num: true, render: (c) => fmtTs(c.registrationDate) },
+      { key: "redirectUris", label: "Redirects", wrap: true, render: (c) => c.redirectUris.join(", ") },
+      { key: "grants", label: "Grants", num: true },
+      { key: "act", label: "", render: (c) => el("button", { type: "button", class: "danger small", onclick: (e) => { e.stopPropagation(); confirmThen(`Delete client ${c.clientName ?? c.clientId} and revoke its ${c.grants} grant(s)? The connector will have to register again.`, () => del(`/api/admin/oauth/clients/${encodeURIComponent(c.clientId)}`), oauth.reload); } }, "Delete") },
+    ];
+    const grantCols = [
+      { key: "clientName", label: "Client", render: (g) => g.clientName ?? g.clientId },
+      { key: "userId", label: "User" },
+      { key: "createdAt", label: "Granted", num: true, render: (g) => fmtTs(g.createdAt) },
+      { key: "expiresAt", label: "Expires", num: true, render: (g) => (g.expiresAt ? fmtTs(g.expiresAt) : "never") },
+      { key: "tokens", label: "Live tokens", num: true, render: (g) => (g.tokens ? `${g.tokens} · until ${fmtTs(g.latestTokenExpiry)}` : "0") },
+      { key: "scope", label: "Scope", wrap: true, render: (g) => g.scope.join(" ") },
+      { key: "act", label: "", render: (g) => el("button", { type: "button", class: "danger small", onclick: (e) => { e.stopPropagation(); confirmThen(`Revoke this grant for ${g.clientName ?? g.clientId}? Its tokens stop working immediately.`, () => del(`/api/admin/oauth/grants/${encodeURIComponent(g.userId)}/${encodeURIComponent(g.id)}`), oauth.reload); } }, "Revoke") },
+    ];
+    return el("div", {},
+      el("div", { class: "tiles" },
+        tile("Clients", r.clients.length, "registered via /register"),
+        tile("Grants", r.grants.length, `${r.grants.filter((g) => g.tokens).length} with live tokens`),
+        tile("Tokens", r.tokens, "access + refresh, unexpired"),
+        tile("This session", me?.email ?? "–", "Hanko · dashboard host", "ok"),
+      ),
+      el("h3", { text: "Clients" }), r.clients.length ? table(r.clients, clientCols, { initialSort: { key: "registrationDate", dir: -1 } }) : el("p", { class: "muted small", text: "none" }),
+      el("h3", { text: "Grants" }), r.grants.length ? table(r.grants, grantCols, { initialSort: { key: "createdAt", dir: -1 } }) : el("p", { class: "muted small", text: "none" }));
+  });
+  grid.append(oauth.card);
+
+  // ---- lookups
+  for (const [tableName, label, hint] of [["sites", "Sites", "cluster centers for site_samples"], ["fields", "Generator fields", "cluster centers for gen_samples"]]) {
+    const card = lazyCard(label, `${hint} · blank coordinates are filled by the next live tick`, async () => {
+      const rows = await api(`/api/lookup/${tableName}`);
+      const numIn = (v, ph) => el("input", { type: "number", step: "1", value: v ?? "", placeholder: ph, class: "inline" });
+      const rowEl = (r) => {
+        const name = el("input", { type: "text", value: r.name, class: "inline name" });
+        const x = numIn(r.x, "x"), y = numIn(r.y, "y"), z = numIn(r.z, "z");
+        const save = async () => {
+          const body = { name: name.value };
+          for (const [k, i] of [["x", x], ["y", y], ["z", z]]) body[k] = i.value === "" ? null : Number(i.value);
+          try { await send(`/api/lookup/${tableName}/${r.id}`, "PATCH", body); await card.reload(); } catch (e) { window.alert(e.message); }
+        };
+        return el("div", { class: "lookup-row" }, el("span", { class: "muted small", text: `#${r.id}` }), name, x, y, z,
+          el("button", { type: "button", class: "small", onclick: save }, "Save"),
+          el("button", { type: "button", class: "ghost small", title: "clear coordinates so the sampler re-seeds this row", onclick: () => confirmThen(`Clear the coordinates of ${r.name}? The next live tick assigns it the largest unclaimed cluster.`, () => send(`/api/lookup/${tableName}/${r.id}`, "PATCH", { x: null, y: null, z: null }), card.reload) }, "Clear"));
+      };
+      const newName = el("input", { type: "text", placeholder: "new row name", class: "inline name" });
+      const add = el("div", { class: "lookup-row add" }, el("span", { class: "muted small", text: "new" }), newName,
+        el("button", { type: "button", class: "small", onclick: async () => { if (!newName.value.trim()) return; try { await send(`/api/lookup/${tableName}`, "POST", { name: newName.value.trim() }); await card.reload(); } catch (e) { window.alert(e.message); } } }, "Add"));
+      return el("div", { class: "lookup" }, el("div", { class: "lookup-row head" }, el("span", { text: "id" }), el("span", { text: "name" }), el("span", { text: "x (cm)" }), el("span", { text: "y (cm)" }), el("span", { text: "z (cm)" }), el("span"), el("span")), rows.map(rowEl), add);
+    });
+    grid.append(card.card);
+  }
+
+  // ---- game (read-only)
+  const game = lazyCard("Game", "live · session, players, switches, chat · read-only until the write path lands", async () => {
+    const r = await api("/api/admin/game?chat=50");
+    const s = r.session ?? {};
+    const errs = Object.entries(r.errors ?? {});
+    const switchCols = [
+      { key: "name", label: "Switch" }, { key: "isOn", label: "State", render: (w) => pill(w.isOn ? "on" : "off", w.isOn ? "ok" : null) },
+      { key: "priority", label: "Priority", num: true }, { key: "primary", label: "Primary group", num: true }, { key: "secondary", label: "Secondary group", num: true }, { key: "location", label: "Location" },
+    ];
+    const chatCols = [{ key: "time", label: "Time", render: (m) => String(m.time ?? "") }, { key: "sender", label: "From" }, { key: "type", label: "Type" }, { key: "message", label: "Message", wrap: true }];
+    const playerCols = [{ key: "name", label: "Player" }, { key: "online", label: "Online", render: (p) => pill(p.online ? "online" : "offline", p.online ? "ok" : null) }, { key: "health", label: "HP", num: true }, { key: "dead", label: "Dead", render: (p) => (p.dead ? "yes" : "") }, { key: "location", label: "Location" }];
+    return el("div", {},
+      errs.length ? el("ul", { class: "issues" }, errs.map(([k, v]) => el("li", { text: `${k}: ${v}` }))) : null,
+      kv([
+        ["Session", s.SessionName], ["State", s.IsPaused ? pill("paused", "warn") : pill("running", "ok")], ["Play time", s.TotalPlayDurationText],
+        ["Day", s.PassedDays != null ? `${s.PassedDays} · ${s.IsDay ? "day" : "night"} ${String(s.Hours ?? 0).padStart(2, "0")}:${String(s.Minutes ?? 0).padStart(2, "0")} · ${s.DayLength}/${s.NightLength} min` : null],
+        ["Since last death", s.NumberOfDaysSinceLastDeath != null ? `${s.NumberOfDaysSinceLastDeath} days` : null],
+        ["Objects", r.uobjects ? `${fmtNum(r.uobjects.count)} of ${fmtNum(r.uobjects.capacity)} (${fmtPct(100 * r.uobjects.count / r.uobjects.capacity)})` : null],
+        ["Game options", s.NodeRando ? `nodes ${s.NodeRando} · purity ${s.NodePurity} · elevator ×${s.SpaceElevatorCost} · recipes ×${s.RecipeCost} · power ×${s.PowerCost}` : null],
+      ]),
+      el("h3", { text: "Players" }), r.players.length ? table(r.players, playerCols, { initialSort: { key: "name", dir: 1 } }) : el("p", { class: "muted small", text: "none" }),
+      el("h3", { text: `Power switches (${r.switches.length})` }), r.switches.length ? table(r.switches, switchCols, { initialSort: { key: "name", dir: 1 } }) : el("p", { class: "muted small", text: "none" }),
+      el("h3", { text: "Chat" }), r.chat.length ? table(r.chat, chatCols, { initialSort: { key: "time", dir: -1 } }) : el("p", { class: "muted small", text: "no messages" }));
+  });
+  grid.append(game.card);
+}
+
+const RENDER = { overview: tabOverview, power: tabPower, emergency: tabEmergency, trains: tabTrains, production: tabProduction, sites: tabSites, gens: tabGens, depot: tabDepot, sinks: tabSinks, admin: tabAdmin };
 
 let renderSeq = 0;
 async function renderTab() {

@@ -6,6 +6,13 @@ import { type HistoryState, type Snapshot, buildTick, gapState, initialState } f
 import { writeTick, writeGap, rollup } from "./store.ts";
 
 const STATE_KEY = "history:state";
+const ROLLUP_KEY = "history:rollup";
+
+export interface RollupMark { at: number; cutoff: number }
+
+/** When the daily rollup last ran and what it rolled, for the admin view. */
+export const readRollupMark = async (env: Env): Promise<RollupMark | null> =>
+  (await env.OAUTH_KV.get(ROLLUP_KEY, "json").catch(() => null)) as RollupMark | null;
 
 export async function readState(env: Env): Promise<HistoryState> {
   const raw = await env.OAUTH_KV.get(STATE_KEY, "json").catch(() => null) as Partial<HistoryState> | null;
@@ -37,5 +44,7 @@ export async function runTick(env: Env, now = Date.now()): Promise<void> {
 
 /** Daily: raw -> hourly for everything older than 7 days, then drop the raw rows. */
 export async function runRollup(env: Env, now = Date.now()): Promise<{ cutoff: number }> {
-  return rollup(env.DB, Math.floor(now / 1000));
+  const r = await rollup(env.DB, Math.floor(now / 1000));
+  await env.OAUTH_KV.put(ROLLUP_KEY, JSON.stringify({ at: Math.floor(now / 1000), cutoff: r.cutoff } satisfies RollupMark));
+  return r;
 }

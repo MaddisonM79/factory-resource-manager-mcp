@@ -9,7 +9,7 @@ import { type Env, readSamples, frmGet, asArray, loc, num } from "../frm/client.
 import { RAW_RETENTION_SECONDS, pickRes, type Res } from "../history/history.ts";
 import { emergencyReport } from "../frm/emergency.ts";
 import { trainsReport } from "../frm/trains.ts";
-import { readSeries, readVisits, readLatest, listLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
+import { readSeries, readVisits, readLatest, listLookup, insertLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
 
 export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
 
@@ -146,16 +146,33 @@ api.get("/api/visits", async (c) => {
   return c.json({ from, to, visits: await readVisits(c.env.DB, { from, to, station: c.req.query("station"), train: c.req.query("train") }) });
 });
 
+/** Lookup rows: name, and coordinates that may be set, changed, or cleared (null) so the sampler re-seeds them. */
+function lookupBody(body: any, requireName: boolean): { name?: string; x?: number | null; y?: number | null; z?: number | null } {
+  if (!body || typeof body !== "object") throw new BadRequest("a JSON body {name?, x?, y?, z?}");
+  const patch: { name?: string; x?: number | null; y?: number | null; z?: number | null } = {};
+  if (body.name !== undefined || requireName) {
+    if (typeof body.name !== "string" || !body.name.trim()) throw new BadRequest("name must be a non-empty string");
+    patch.name = body.name.trim().slice(0, 80);
+  }
+  for (const k of ["x", "y", "z"] as const) {
+    if (body[k] === undefined) continue;
+    if (body[k] === null) { patch[k] = null; continue; }
+    if (typeof body[k] !== "number" || !Number.isFinite(body[k])) throw new BadRequest(`${k} must be a number or null`);
+    patch[k] = body[k];
+  }
+  return patch;
+}
+
 for (const table of ["sites", "fields"] as const) {
   api.get(`/api/lookup/${table}`, async (c) => c.json(await listLookup(c.env.DB, table)));
+  api.post(`/api/lookup/${table}`, async (c) => {
+    const row = lookupBody(await c.req.json().catch(() => null), true);
+    return c.json(await insertLookup(c.env.DB, table, { name: row.name!, x: row.x, y: row.y, z: row.z }), 201);
+  });
   api.patch(`/api/lookup/${table}/:id`, async (c) => {
     const id = Number(c.req.param("id"));
-    const body = await c.req.json().catch(() => null);
-    if (!Number.isInteger(id) || !body || typeof body !== "object") throw new BadRequest("integer id and a JSON body {name?, x?, y?, z?}");
-    const patch: { name?: string; x?: number; y?: number; z?: number } = {};
-    if (body.name !== undefined) { if (typeof body.name !== "string" || !body.name.trim()) throw new BadRequest("name must be a non-empty string"); patch.name = body.name.trim().slice(0, 80); }
-    for (const k of ["x", "y", "z"] as const) if (body[k] !== undefined) { if (typeof body[k] !== "number" || !Number.isFinite(body[k])) throw new BadRequest(`${k} must be a number`); patch[k] = body[k]; }
-    const row = await updateLookup(c.env.DB, table, id, patch);
+    if (!Number.isInteger(id)) throw new BadRequest("integer id");
+    const row = await updateLookup(c.env.DB, table, id, lookupBody(await c.req.json().catch(() => null), false));
     if (!row) throw new NotFound(`no ${table} row ${id}`);
     return c.json(row);
   });

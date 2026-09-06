@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { d1 } from "../d1.ts";
 import { snapshot, station, train, sink, machine, dronePort, counter, M } from "../fixtures.ts";
 import { buildTick, gapState, initialState, HOUR, RAW_RETENTION_SECONDS, type HistoryState } from "../../src/history/history.ts";
-import { writeTick, writeGap, rollup, readSeries, readVisits, readLatest, listLookup, updateLookup, rollupCutoff } from "../../src/history/store.ts";
+import { writeTick, writeGap, rollup, readSeries, readVisits, readLatest, listLookup, insertLookup, updateLookup, rollupCutoff, tableStats, epochs, recentGaps, rollupStatus } from "../../src/history/store.ts";
 
 const T0 = 1_700_000_000;
 
@@ -204,4 +204,44 @@ test("drone and counter series: raw per station / counter, hourly with min and m
   assert.deepEqual(latest.drones.map((r) => r.station), ["A", "B"]);
   assert.deepEqual(latest.counters.map((r) => r.counter_id), ["CM-1", "CM-2"]);
   assert.ok(latest.gens.every((g) => "load_pct" in g && "waste" in g), "generator rows carry load and waste");
+});
+
+test("admin queries: table stats, epochs with gap counts, recent gaps, and rollup status before and after a rollup", async () => {
+  const db = d1();
+  const now = T0 + 30 * 24 * HOUR;
+  const old = rollupCutoff(now) - 2 * HOUR;
+  await drive(db, [
+    { ts: old, snap: { play: 1 } }, { ts: old + 300, gap: "down" }, { ts: old + 600, snap: { play: 7 } },
+    { ts: now - 600, snap: { play: 3, name: "Other Save" } }, { ts: now - 300, snap: { play: 6, name: "Other Save" } },
+  ]);
+  const stats = await tableStats(db);
+  const power = stats.find((t) => t.table === "power_samples")!;
+  assert.deepEqual([power.rows, power.oldest, power.newest], [4, old, now - 300]);
+  assert.equal(stats.find((t) => t.table === "gap_samples")!.rows, 1);
+  assert.ok(stats.some((t) => t.table === "hourly_counter"), "every hourly table is listed");
+
+  let ep = await epochs(db);
+  assert.deepEqual(ep.map((e) => [e.epoch, e.session, e.ticks, e.gaps]), [[2, "Other Save", 2, 0], [1, "Save A", 2, 1]]);
+  assert.deepEqual((await recentGaps(db)).map((g) => [g.ts, g.epoch, g.reason]), [[old + 300, 1, "down"]]);
+
+  let rs = await rollupStatus(db, now);
+  assert.ok(rs.raw_rows_past_cutoff > 0, "raw rows older than the cutoff are pending");
+  assert.equal(rs.newest_hourly_bucket, null);
+  await rollup(db, now);
+  rs = await rollupStatus(db, now);
+  assert.equal(rs.raw_rows_past_cutoff, 0);
+  assert.equal(rs.newest_hourly_bucket, Math.floor((old + 600) / HOUR) * HOUR);
+  ep = await epochs(db);
+  assert.deepEqual(ep.map((e) => [e.epoch, e.ticks, e.gaps]), [[2, 2, 0], [1, 2, 1]], "epoch 1 survives in the hourly table after its raw rows are rolled");
+});
+
+test("lookup rows can be added without coordinates and have them cleared for re-seeding", async () => {
+  const db = d1();
+  const row = await insertLookup(db, "sites", { name: "New Site" });
+  assert.equal(row.id, 12); assert.equal(row.x, null);
+  const cleared = await updateLookup(db, "sites", 1, { x: null, y: null, z: null });
+  assert.deepEqual([cleared!.x, cleared!.y, cleared!.z], [null, null, null]);
+  await drive(db, [{ ts: T0, snap: {} }]);
+  const after = await listLookup(db, "sites");
+  assert.ok(after.find((s) => s.id === 1)!.x != null, "the cleared row is re-seeded by the next live tick");
 });

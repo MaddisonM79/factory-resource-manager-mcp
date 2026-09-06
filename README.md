@@ -176,14 +176,31 @@ GET /api/series/sinks
 GET /api/series/drone/:station           /api/series/drone = every port
 GET /api/series/counter/:id              FRM counter ID (or name); /api/series/counter = every counter
 GET /api/visits?station=&train=&from=&to=
-GET /api/lookup/sites                  PATCH /api/lookup/sites/:id
-GET /api/lookup/fields                 PATCH /api/lookup/fields/:id
+GET /api/lookup/sites                  POST adds a row; PATCH /api/lookup/sites/:id (x/y/z may be null to re-seed)
+GET /api/lookup/fields                 POST / PATCH likewise
 ```
 
 A series is `{ epoch, session, res, points: [{ ts, ... }], gaps: [{ from, to }] }`;
 when the window spans epochs you get an array of them. Hourly points add
 `sample_count` and `gap_count`; treat `gap_count > 0` as low confidence.
-Nothing under `/api` can reach the FRM tunnel.
+Only `/api/status`, `/api/emergency`, `/api/trains` and the admin routes
+reach the FRM tunnel; everything else is served from KV and D1.
+
+#### Admin API (dashboard host only)
+
+Mounted behind the Hanko session and allow-list, never behind the OAuth
+bearer: a connector token must not be able to list or revoke other
+connectors.
+
+```
+GET    /api/admin/system                 vars and gates: origin, hosts, allow-list, write tools, API key, Access token
+GET    /api/admin/origin                 live reachability with latency, FRM version, mod list
+GET    /api/admin/sampler                KV state and ring, D1 table sizes, epochs, recent gaps, rollup status
+GET    /api/admin/oauth                  OAuth clients, grants (every user id), live token counts
+DELETE /api/admin/oauth/grants/:user/:id revoke a grant and its tokens
+DELETE /api/admin/oauth/clients/:id      delete a client and revoke its grants
+GET    /api/admin/game                   session, players, power switches, chat (?chat=N), object pool; read-only
+```
 
 ## Dashboard
 
@@ -198,7 +215,12 @@ sinks, an Emergency tab for the dark-restart reserves, and a Trains tab
 platforms, what is docked or inbound and which trains schedule it; the dock
 history from `train_visits` with dwell and cargo moved; a station's transfer
 rate over time; every signal at Stop or on an invalid block, with the full
-list behind a toggle). Every chart takes the same time range (1 h to 30 d) and a Local / UTC
+list behind a toggle). An Admin tab covers the stack itself: origin
+reachability and latency with the FRM version and mod list, the Worker's
+configuration and gates, sampler state with D1 table sizes, epochs, gaps
+and rollup status, OAuth clients and grants with revoke, site and field
+lookup editing, and a read-only game panel (session, players, switches,
+chat). Every chart takes the same time range (1 h to 30 d) and a Local / UTC
 toggle in the header; outages are shaded, save reloads are marked with the
 session name, and nothing is interpolated across either. Tables come from
 `/api/latest`, the newest tick from every history table with sites and

@@ -182,8 +182,17 @@ export async function listLookup(db: D1Database, table: "sites" | "fields"): Pro
   return all<Lookup>(db, `SELECT id, name, x, y, z FROM ${table} ORDER BY id`);
 }
 
+export type LookupPatch = { name?: string; x?: number | null; y?: number | null; z?: number | null };
+
+/** A new lookup row. Without coordinates the sampler fills them from the largest unclaimed cluster on its next live tick. */
+export async function insertLookup(db: D1Database, table: "sites" | "fields", row: { name: string; x?: number | null; y?: number | null; z?: number | null }): Promise<Lookup> {
+  const r = await db.prepare(`INSERT INTO ${table} (name, x, y, z) VALUES (?, ?, ?, ?) RETURNING id, name, x, y, z`)
+    .bind(row.name, row.x ?? null, row.y ?? null, row.z ?? null).first<Lookup>();
+  return r!;
+}
+
 export async function updateLookup(
-  db: D1Database, table: "sites" | "fields", id: number, patch: { name?: string; x?: number; y?: number; z?: number },
+  db: D1Database, table: "sites" | "fields", id: number, patch: LookupPatch,
 ): Promise<Lookup | null> {
   const sets: string[] = [], params: unknown[] = [];
   for (const k of ["name", "x", "y", "z"] as const) if (patch[k] !== undefined) { sets.push(`${k} = ?`); params.push(patch[k]); }
@@ -415,6 +424,52 @@ export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series
 }
 
 export interface Visit { ts: number; epoch: number; session: string; station: string; train: string; arrived_ts: number; departed_ts: number | null; delta_cargo: number | null }
+
+// ---------------------------------------------------------------- admin
+
+export interface TableStat { table: string; rows: number; oldest: number | null; newest: number | null }
+export interface EpochRow { epoch: number; session: string; first_ts: number; last_ts: number; ticks: number; gaps: number }
+export interface GapRow { ts: number; epoch: number; session: string; reason: string }
+
+const HOURLY_TABLES = ["hourly_power", "hourly_site", "hourly_gen", "hourly_depot", "hourly_prod", "hourly_station", "hourly_sink", "hourly_drone", "hourly_counter"] as const;
+
+/** Row counts and time span of every history table (one query each, cheap on D1's indexes). */
+export async function tableStats(db: D1Database): Promise<TableStat[]> {
+  const raw = RAW_TABLES.map((t) => db.prepare(`SELECT '${t}' AS "table", COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest FROM ${t}`));
+  const hourly = HOURLY_TABLES.map((t) => db.prepare(`SELECT '${t}' AS "table", COUNT(*) AS rows, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM ${t}`));
+  const other = [
+    db.prepare(`SELECT 'train_visits' AS "table", COUNT(*) AS rows, MIN(arrived_ts) AS oldest, MAX(arrived_ts) AS newest FROM train_visits`),
+    db.prepare(`SELECT 'gap_samples' AS "table", COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest FROM gap_samples`),
+  ];
+  const out = await db.batch<TableStat>([...raw, ...hourly, ...other]);
+  return out.map((r) => r.results[0]);
+}
+
+/** Every epoch seen in power_samples (raw) and hourly_power, with its tick and gap counts. */
+export async function epochs(db: D1Database): Promise<EpochRow[]> {
+  return all<EpochRow>(db, `
+    SELECT epoch, session, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts, SUM(ticks) AS ticks,
+      (SELECT COUNT(*) FROM gap_samples g WHERE g.epoch = e.epoch) AS gaps
+    FROM (
+      SELECT epoch, session, MIN(ts) AS first_ts, MAX(ts) AS last_ts, COUNT(DISTINCT ts) AS ticks FROM power_samples GROUP BY epoch, session
+      UNION ALL
+      SELECT epoch, session, MIN(bucket_ts), MAX(bucket_ts), SUM(sample_count) FROM hourly_power GROUP BY epoch, session
+    ) e GROUP BY epoch, session ORDER BY epoch DESC`);
+}
+
+export const recentGaps = (db: D1Database, limit = 50): Promise<GapRow[]> =>
+  all<GapRow>(db, "SELECT ts, epoch, session, reason FROM gap_samples ORDER BY ts DESC LIMIT ?", limit);
+
+export interface RollupStatus { cutoff: number; raw_rows_past_cutoff: number; newest_hourly_bucket: number | null; oldest_raw_ts: number | null }
+
+/** Whether the daily rollup is keeping up: raw rows older than the cutoff should be zero after it runs. */
+export async function rollupStatus(db: D1Database, now: number): Promise<RollupStatus> {
+  const cutoff = rollupCutoff(now);
+  const counts = await db.batch<{ n: number }>(RAW_TABLES.map((t) => db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ts < ?`).bind(cutoff)));
+  const newest = await db.prepare("SELECT MAX(bucket_ts) AS b FROM hourly_power").first<{ b: number | null }>();
+  const oldest = await db.prepare("SELECT MIN(ts) AS t FROM power_samples").first<{ t: number | null }>();
+  return { cutoff, raw_rows_past_cutoff: counts.reduce((n, r) => n + Number(r.results[0]?.n ?? 0), 0), newest_hourly_bucket: newest?.b ?? null, oldest_raw_ts: oldest?.t ?? null };
+}
 
 export async function readVisits(db: D1Database, q: { from: number; to: number; station?: string | null; train?: string | null }): Promise<Visit[]> {
   const where: string[] = [], params: unknown[] = [q.from, q.to];
