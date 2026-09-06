@@ -75,21 +75,39 @@ export interface TrainsReport {
 }
 
 /**
- * FRM 1.5 labels a signal's Aspect with the ERailroadBlockValidation enum's display names by mistake
- * (the aspect index is looked up in the wrong enum), so "Valid" means Clear and "No Exit Signal" means
- * Stop. Both the mislabelled and the correct names are accepted, so a fixed FRM keeps working.
+ * Block validation as FRM reports it. Shipping builds of the game strip enum display names, so the
+ * live value is the raw enum name (RBV_Valid); an editor build would say "Valid". Both are normalised.
  */
-const ASPECT_BY_MISLABEL: Record<string, string> = { Unvalidated: "None", Valid: "Clear", "No Exit Signal": "Stop", "Contains Loop": "Dock" };
+const BLOCK_NAMES: Record<string, string> = {
+  RBV_Unvalidated: "Unvalidated", RBV_Valid: "Valid", RBV_NoExitSignals: "No Exit Signal", RBV_ContainsLoop: "Contains Loop",
+  RBV_ContainsMixedEntrySignals: "Contains Mixed Entry Signals", RBV_ContainsStation: "Contain Station",
+};
+export function blockValidation(raw: unknown): string {
+  const s = String(raw ?? "");
+  return BLOCK_NAMES[s] ?? s;
+}
+
+/**
+ * FRM 1.5.3 labels a signal's Aspect with the ERailroadBlockValidation enum by mistake (the aspect
+ * index is looked up in the wrong enum), so the aspect arrives as a block-validation name whose
+ * position matches the real aspect: index 0 None, 1 Clear, 2 Stop, 3 Dock. Live shipping builds
+ * send the raw enum names (RBV_NoExitSignals = Stop); editor builds would send display names.
+ * Correct aspect names (with or without their RSA_ prefix) pass through, so a fixed FRM keeps working.
+ */
+const ASPECT_BY_MISLABEL: Record<string, string> = {
+  RBV_Unvalidated: "None", RBV_Valid: "Clear", RBV_NoExitSignals: "Stop", RBV_ContainsLoop: "Dock",
+  Unvalidated: "None", Valid: "Clear", "No Exit Signal": "Stop", "Contains Loop": "Dock",
+};
 const ASPECTS = new Set(["None", "Clear", "Stop", "Dock"]);
 export function signalAspect(raw: unknown): string {
-  const s = String(raw ?? "");
+  const s = String(raw ?? "").replace(/^RSA_/, "");
   if (ASPECTS.has(s)) return s;
   return ASPECT_BY_MISLABEL[s] ?? s;
 }
 
 export function signalRows(signalsRaw: unknown): SignalRow[] {
   return asArray(signalsRaw).map((s) => {
-    const block = String(s.BlockValid ?? "");
+    const block = blockValidation(s.BlockValid);
     return {
       id: String(s.ID ?? ""),
       kind: /path/i.test(String(s.ClassName ?? s.Name ?? "")) ? "path" : "block",

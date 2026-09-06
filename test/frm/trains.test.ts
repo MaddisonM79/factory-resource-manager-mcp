@@ -61,6 +61,12 @@ test("signals: FRM 1.5's mislabelled aspects are mapped, correct names pass thro
   assert.equal(signalAspect("Contains Loop"), "Dock");
   assert.equal(signalAspect("Unvalidated"), "None");
   assert.equal(signalAspect("Stop"), "Stop", "a fixed FRM already says Stop");
+  assert.equal(signalAspect("RSA_Dock"), "Dock");
+  // A shipping build of the game strips display names: the live payload carries raw enum names.
+  assert.equal(signalAspect("RBV_NoExitSignals"), "Stop");
+  assert.equal(signalAspect("RBV_Valid"), "Clear");
+  const live = trainsReport([], [], [signal("L1", "RBV_NoExitSignals", "RBV_Valid", "Build_RailroadPathSignal_C"), signal("L2", "RBV_Valid", "RBV_ContainsLoop")]);
+  assert.deepEqual(live.signals.map((s) => [s.id, s.aspect, s.block, s.blockOk]), [["L2", "Clear", "Contains Loop", false], ["L1", "Stop", "Valid", true]]);
   const r = trainsReport([], [], [
     signal("S1", "Valid"), signal("S2", "No Exit Signal"), signal("S3", "Valid", "Contains Loop", "Build_RailroadPathSignal_C"), signal("S4", "Clear", "Valid"),
   ]);

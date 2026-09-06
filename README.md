@@ -82,9 +82,13 @@ endpoint with `limit: 1` and compare keys.
   matches counters to belts by position. Everywhere else it infers problems
   from the machine a belt connects to.
 - `getTrainSignals.Aspect` is mislabelled in FRM 1.5.3: the aspect index is
-  looked up in the block-validation enum, so `Valid` means Clear,
-  `No Exit Signal` means Stop, `Contains Loop` means Dock. `trains.ts`
-  maps both spellings. `BlockValid` is correct.
+  looked up in the block-validation enum, so `RBV_Valid` means Clear,
+  `RBV_NoExitSignals` means Stop, `RBV_ContainsLoop` means Dock. The live
+  game sends raw enum names because shipping builds strip display names;
+  `trains.ts` maps raw and display spellings. `BlockValid` is correct
+  (`RBV_Valid` is a properly bounded block).
+- Live `getGenerators` says `Supplement.Name: "N/A"` with `PercentFull: 0`
+  for generators that take no water; that is not an empty feed.
 - `getDroneStation` carries FRM's own transport statistics per port:
   averaged in/out items per minute, estimated total rate, average / median /
   latest round trip, items per trip, and the active fuel's cost per trip.

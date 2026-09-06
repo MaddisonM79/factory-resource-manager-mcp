@@ -52,7 +52,9 @@ export function summarizeGenerators(gens: any[], keyOf: (g: any) => string): Rec
     s.capacityMW += genCapacityMw(g);
     const l = genLoadPct(g);
     if (l != null) (loads[k] ??= []).push(l);
-    if (fueled && g.Supplement?.Name && typeof g.Supplement.PercentFull === "number" && g.Supplement.PercentFull <= 0) s.supplementEmpty++;
+    // Live FRM reports Supplement.Name "N/A" (and a PercentFull of 0) for generators that take no supplement.
+    const supp = String(g.Supplement?.Name ?? "");
+    if (fueled && supp && supp !== "N/A" && typeof g.Supplement.PercentFull === "number" && g.Supplement.PercentFull <= 0) s.supplementEmpty++;
     s.waste += genWaste(g);
     if (g.NuclearWarning && g.NuclearWarning !== "None") s.warnings.push({ id: String(g.ID ?? ""), name: String(g.Name ?? ""), warning: String(g.NuclearWarning), location: loc(g) });
     s.powerShards += num(g.PowerShards); s.somersloops += num(g.Somersloops);
