@@ -30,7 +30,7 @@
     // FRM behind a Cloudflare Tunnel + Access service auth. A first-level name: the tunnel's
     // CNAME relies on Universal SSL, which does not cover deeper subdomains.
     "FRM_BASE_URL": "https://frm-cft.lmam.tech",
-    "FRM_ALLOW_WRITE": "false",
+    "FRM_ALLOW_WRITE": "true",
     "MCP_HOSTS": "mcp.frm.hosted.lmam.tech",
     "DASH_HOST": "app.frm.hosted.lmam.tech",
     "HANKO_API_URL": "https://auth.lmam.tech",
