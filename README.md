@@ -308,7 +308,10 @@ curl https://<your-worker-host>/.well-known/oauth-authorization-server
 - The MCP endpoint requires an OAuth bearer token issued by the Worker.
   Issuing one requires the passphrase, compared in constant time.
 - Write tools are refused unless `FRM_ALLOW_WRITE=true` is set on the Worker.
-  Flip it deliberately, and consider setting FRM's own API key too.
+  Flip it deliberately, and set FRM's own token too: FRM generates one as
+  `uWS.AuthenticationToken` in its config and requires it on write
+  endpoints in the `X-FRM-Authorization` header. Store it as the
+  `FRM_API_KEY` secret and the Worker sends it on every POST.
 - Service tokens expire (default one year). When yours does, rotate it in
   Zero Trust, re-put both secrets, and update cloudflared if it shares the token.
 
