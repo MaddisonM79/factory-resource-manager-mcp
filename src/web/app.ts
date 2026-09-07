@@ -8,6 +8,7 @@ import { getCookie } from "hono/cookie";
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey, type JWTPayload } from "jose";
 import type { Env } from "../frm/client.ts";
 import { api, apiError } from "../api/routes.ts";
+import { admin } from "../api/admin.ts";
 
 export const SESSION_COOKIE = "hanko";
 
@@ -79,7 +80,8 @@ dash.use("/api/*", async (c, next) => {
 
 dash.get("/api/me", (c) => c.json(c.get("viewer")));
 
-// Same routes as the OAuth-fronted /api/ on the MCP host.
+// Admin routes exist only here, behind the Hanko session; then the same read API as the MCP host.
+dash.route("/", admin);
 dash.route("/", api);
 
 // Everything else is a static file from public/ (index.html at /).

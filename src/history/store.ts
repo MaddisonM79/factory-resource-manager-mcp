@@ -12,7 +12,7 @@ type Row = Record<string, unknown>;
 const MAX_PARAMS = 100;
 const KEY_COLS = ["ts", "session", "playtime", "epoch"] as const;
 
-const RAW_TABLES = ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples"] as const;
+const RAW_TABLES = ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples", "drone_samples", "counter_samples"] as const;
 
 // ---------------------------------------------------------------- writes
 
@@ -43,6 +43,8 @@ export async function writeTick(db: D1Database, t: Tick): Promise<void> {
     ...insertStatements(db, "prod_samples", k, t.prod),
     ...insertStatements(db, "station_samples", k, t.station),
     ...insertStatements(db, "sink_samples", k, t.sink),
+    ...insertStatements(db, "drone_samples", k, t.drone),
+    ...insertStatements(db, "counter_samples", k, t.counter),
     ...insertStatements(db, "train_visits", k, t.visitOpens.map((v) => ({ ...v, departed_ts: null, delta_cargo: null }))),
     ...t.visitCloses.map((v) =>
       db.prepare("UPDATE train_visits SET departed_ts = ?, delta_cargo = ? WHERE station = ? AND train = ? AND arrived_ts = ? AND departed_ts IS NULL")
@@ -82,8 +84,8 @@ const ROLLUPS: { table: string; hourly: string; cols: string; select: string; gr
   {
     // field_id: 0 = map-wide, -1 = spatial cluster (resolved on read by center). NULL would defeat the UNIQUE key.
     table: "gen_samples", hourly: "hourly_gen",
-    cols: "fuel_type, field_id, cell_x, cell_y, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw",
-    select: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0), AVG(center_x), AVG(center_y), AVG(center_z), AVG(total), AVG(fueled), AVG(dry), MIN(dry), MAX(dry), AVG(capacity_mw)",
+    cols: "fuel_type, field_id, cell_x, cell_y, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw, load_pct, waste, waste_max",
+    select: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0), AVG(center_x), AVG(center_y), AVG(center_z), AVG(total), AVG(fueled), AVG(dry), MIN(dry), MAX(dry), AVG(capacity_mw), AVG(load_pct), AVG(waste), MAX(waste)",
     group: "fuel_type, COALESCE(field_id, -1), COALESCE(CAST(center_x / 10000 AS INTEGER), 0), COALESCE(CAST(center_y / 10000 AS INTEGER), 0)",
   },
   {
@@ -109,6 +111,18 @@ const ROLLUPS: { table: string; hourly: string; cols: string; select: string; gr
     cols: "sink, coupons, coupons_max, points_to_next, points_per_min",
     select: "sink, AVG(coupons), MAX(coupons), AVG(points_to_next), AVG(points_per_min)",
     group: "sink",
+  },
+  {
+    table: "drone_samples", hourly: "hourly_drone",
+    cols: "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, fuel_min, input_stock, output_stock",
+    select: "station, MAX(paired), MAX(status), AVG(in_per_min), AVG(out_per_min), AVG(est_per_min), AVG(round_trip_s), AVG(trip_in), AVG(trip_out), AVG(fuel), MIN(fuel), AVG(input_stock), AVG(output_stock)",
+    group: "station",
+  },
+  {
+    table: "counter_samples", hourly: "hourly_counter",
+    cols: "counter_id, name, belt, cap_per_min, items_per_min, items_min, items_max, confidence",
+    select: "counter_id, MAX(name), MAX(belt), AVG(cap_per_min), AVG(items_per_min), MIN(items_per_min), MAX(items_per_min), AVG(confidence)",
+    group: "counter_id",
   },
 ];
 
@@ -146,7 +160,7 @@ export interface Series {
   gaps: Gap[];
 }
 
-export type SeriesKind = "power" | "site" | "gens" | "depot" | "prod" | "station" | "sinks";
+export type SeriesKind = "power" | "site" | "gens" | "depot" | "prod" | "station" | "sinks" | "drone" | "counter";
 
 export interface SeriesQuery { kind: SeriesKind; from: number; to: number; res: Res; key?: string | null }
 
@@ -168,8 +182,17 @@ export async function listLookup(db: D1Database, table: "sites" | "fields"): Pro
   return all<Lookup>(db, `SELECT id, name, x, y, z FROM ${table} ORDER BY id`);
 }
 
+export type LookupPatch = { name?: string; x?: number | null; y?: number | null; z?: number | null };
+
+/** A new lookup row. Without coordinates the sampler fills them from the largest unclaimed cluster on its next live tick. */
+export async function insertLookup(db: D1Database, table: "sites" | "fields", row: { name: string; x?: number | null; y?: number | null; z?: number | null }): Promise<Lookup> {
+  const r = await db.prepare(`INSERT INTO ${table} (name, x, y, z) VALUES (?, ?, ?, ?) RETURNING id, name, x, y, z`)
+    .bind(row.name, row.x ?? null, row.y ?? null, row.z ?? null).first<Lookup>();
+  return r!;
+}
+
 export async function updateLookup(
-  db: D1Database, table: "sites" | "fields", id: number, patch: { name?: string; x?: number; y?: number; z?: number },
+  db: D1Database, table: "sites" | "fields", id: number, patch: LookupPatch,
 ): Promise<Lookup | null> {
   const sets: string[] = [], params: unknown[] = [];
   for (const k of ["name", "x", "y", "z"] as const) if (patch[k] !== undefined) { sets.push(`${k} = ?`); params.push(patch[k]); }
@@ -227,6 +250,8 @@ export const SERIES_KEY_COLS: Record<SeriesKind, string[]> = {
   prod: ["item"],
   station: ["station", "platform"],
   sinks: ["sink"],
+  drone: ["station"],
+  counter: ["counter_id"],
 };
 
 export const seriesKeyOf = (kind: SeriesKind, r: Row): string => SERIES_KEY_COLS[kind].map((c) => String(r[c] ?? "")).join("|");
@@ -264,6 +289,8 @@ export interface Latest {
   prod: Row[];
   stations: Row[];
   sinks: Row[];
+  drones: Row[];
+  counters: Row[];
 }
 
 /** Every table's rows for the newest good tick, with sites and generator fields resolved to lookup names. */
@@ -271,18 +298,20 @@ export async function readLatest(db: D1Database): Promise<Latest> {
   const head = await db.prepare("SELECT ts, epoch, session, playtime FROM power_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; epoch: number; session: string; playtime: number }>();
   const gapRow = await db.prepare("SELECT ts, reason FROM gap_samples ORDER BY ts DESC LIMIT 1").first<{ ts: number; reason: string }>();
   const gap = gapRow && (!head || gapRow.ts > head.ts) ? gapRow : null;
-  if (!head) return { ts: null, epoch: null, session: null, playtime: null, gap, power: [], sites: [], gens: [], depot: [], prod: [], stations: [], sinks: [] };
+  if (!head) return { ts: null, epoch: null, session: null, playtime: null, gap, power: [], sites: [], gens: [], depot: [], prod: [], stations: [], sinks: [], drones: [], counters: [] };
   const ts = head.ts;
   const at = (sql: string) => all(db, sql, ts);
-  const [siteLookup, fieldLookup, power, sites, gens, depot, prod, stations, sinks] = await Promise.all([
+  const [siteLookup, fieldLookup, power, sites, gens, depot, prod, stations, sinks, drones, counters] = await Promise.all([
     listLookup(db, "sites"), listLookup(db, "fields"),
     at("SELECT circuit_group, capacity_mw, production_mw, consumed_mw, max_consumed_mw, battery_pct, battery_in_mw, battery_out_mw, fuse_tripped FROM power_samples WHERE ts = ? ORDER BY circuit_group"),
     at("SELECT site_id, center_x, center_y, center_z, machines, running, blocked, starved, unpowered, paused, unconfigured, idle, mw_draw, mw_max, avg_productivity FROM site_samples WHERE ts = ? ORDER BY machines DESC"),
-    at("SELECT fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw FROM gen_samples WHERE ts = ? ORDER BY fuel_type, field_id"),
+    at("SELECT fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw, load_pct, waste FROM gen_samples WHERE ts = ? ORDER BY fuel_type, field_id"),
     at("SELECT item, stock, capacity, is_full FROM depot_samples WHERE ts = ? ORDER BY item"),
     at("SELECT item, produced_per_min, consumed_per_min, max_prod, max_cons FROM prod_samples WHERE ts = ? ORDER BY item"),
     at("SELECT station, platform, mode, cargo, transfer_rate, docked_train, inbound FROM station_samples WHERE ts = ? ORDER BY station, platform"),
     at("SELECT sink, coupons, points_to_next, points_per_min FROM sink_samples WHERE ts = ? ORDER BY sink"),
+    at("SELECT station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, input_stock, output_stock FROM drone_samples WHERE ts = ? ORDER BY station"),
+    at("SELECT counter_id, name, belt, cap_per_min, items_per_min, confidence FROM counter_samples WHERE ts = ? ORDER BY name, counter_id"),
   ]);
   const nameOf = (lookup: Lookup[], id: unknown) => lookup.find((l) => l.id === Number(id))?.name ?? null;
   return {
@@ -296,7 +325,7 @@ export async function readLatest(db: D1Database): Promise<Latest> {
       const field_id = r.field_id == null ? resolveCenter({ x: Number(r.center_x), y: Number(r.center_y) }, fieldLookup) : Number(r.field_id);
       return { ...r, field_id, name: field_id === 0 ? "map-wide" : nameOf(fieldLookup, field_id) };
     }),
-    depot, prod, stations, sinks,
+    depot, prod, stations, sinks, drones, counters,
   };
 }
 
@@ -332,8 +361,8 @@ export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series
       break;
     }
     case "gens": {
-      const rawCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw";
-      const hourlyCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw";
+      const rawCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, capacity_mw, load_pct, waste";
+      const hourlyCols = "fuel_type, field_id, center_x, center_y, center_z, total, fueled, dry, dry_min, dry_max, capacity_mw, load_pct, waste, waste_max";
       if (q.key == null || q.key === "") {
         rows = await all(db, sql(res, "gen_samples", "hourly_gen", rawCols, hourlyCols, "AND field_id = 0", "fuel_type"), from, to);
         break;
@@ -375,11 +404,72 @@ export async function readSeries(db: D1Database, q: SeriesQuery): Promise<Series
         "sink, coupons, points_to_next, points_per_min", "sink, coupons, coupons_max, points_to_next, points_per_min",
         "", "sink"), from, to);
       break;
+    case "drone": {
+      const cols = "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, input_stock, output_stock";
+      const hourlyCols = "station, paired, status, in_per_min, out_per_min, est_per_min, round_trip_s, trip_in, trip_out, fuel, fuel_min, input_stock, output_stock";
+      const one = q.key != null && q.key !== "" && q.key !== "all";
+      rows = await all(db, sql(res, "drone_samples", "hourly_drone", cols, hourlyCols, one ? "AND station = ? COLLATE NOCASE" : "", "station"), from, to, ...(one ? [q.key] : []));
+      break;
+    }
+    case "counter": {
+      const cols = "counter_id, name, belt, cap_per_min, items_per_min, confidence";
+      const hourlyCols = "counter_id, name, belt, cap_per_min, items_per_min, items_min, items_max, confidence";
+      const one = q.key != null && q.key !== "" && q.key !== "all";
+      // Counters have no player-facing name, so the key is FRM's ID; a name match is accepted too.
+      rows = await all(db, sql(res, "counter_samples", "hourly_counter", cols, hourlyCols, one ? "AND (counter_id = ? OR name = ? COLLATE NOCASE)" : "", "counter_id"), from, to, ...(one ? [q.key, q.key] : []));
+      break;
+    }
   }
   return toSeries(rows, await gapsP, res);
 }
 
 export interface Visit { ts: number; epoch: number; session: string; station: string; train: string; arrived_ts: number; departed_ts: number | null; delta_cargo: number | null }
+
+// ---------------------------------------------------------------- admin
+
+export interface TableStat { table: string; rows: number; oldest: number | null; newest: number | null }
+export interface EpochRow { epoch: number; session: string; first_ts: number; last_ts: number; ticks: number; gaps: number }
+export interface GapRow { ts: number; epoch: number; session: string; reason: string }
+
+const HOURLY_TABLES = ["hourly_power", "hourly_site", "hourly_gen", "hourly_depot", "hourly_prod", "hourly_station", "hourly_sink", "hourly_drone", "hourly_counter"] as const;
+
+/** Row counts and time span of every history table (one query each, cheap on D1's indexes). */
+export async function tableStats(db: D1Database): Promise<TableStat[]> {
+  const raw = RAW_TABLES.map((t) => db.prepare(`SELECT '${t}' AS "table", COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest FROM ${t}`));
+  const hourly = HOURLY_TABLES.map((t) => db.prepare(`SELECT '${t}' AS "table", COUNT(*) AS rows, MIN(bucket_ts) AS oldest, MAX(bucket_ts) AS newest FROM ${t}`));
+  const other = [
+    db.prepare(`SELECT 'train_visits' AS "table", COUNT(*) AS rows, MIN(arrived_ts) AS oldest, MAX(arrived_ts) AS newest FROM train_visits`),
+    db.prepare(`SELECT 'gap_samples' AS "table", COUNT(*) AS rows, MIN(ts) AS oldest, MAX(ts) AS newest FROM gap_samples`),
+  ];
+  const out = await db.batch<TableStat>([...raw, ...hourly, ...other]);
+  return out.map((r) => r.results[0]);
+}
+
+/** Every epoch seen in power_samples (raw) and hourly_power, with its tick and gap counts. */
+export async function epochs(db: D1Database): Promise<EpochRow[]> {
+  return all<EpochRow>(db, `
+    SELECT epoch, session, MIN(first_ts) AS first_ts, MAX(last_ts) AS last_ts, SUM(ticks) AS ticks,
+      (SELECT COUNT(*) FROM gap_samples g WHERE g.epoch = e.epoch) AS gaps
+    FROM (
+      SELECT epoch, session, MIN(ts) AS first_ts, MAX(ts) AS last_ts, COUNT(DISTINCT ts) AS ticks FROM power_samples GROUP BY epoch, session
+      UNION ALL
+      SELECT epoch, session, MIN(bucket_ts), MAX(bucket_ts), SUM(sample_count) FROM hourly_power GROUP BY epoch, session
+    ) e GROUP BY epoch, session ORDER BY epoch DESC`);
+}
+
+export const recentGaps = (db: D1Database, limit = 50): Promise<GapRow[]> =>
+  all<GapRow>(db, "SELECT ts, epoch, session, reason FROM gap_samples ORDER BY ts DESC LIMIT ?", limit);
+
+export interface RollupStatus { cutoff: number; raw_rows_past_cutoff: number; newest_hourly_bucket: number | null; oldest_raw_ts: number | null }
+
+/** Whether the daily rollup is keeping up: raw rows older than the cutoff should be zero after it runs. */
+export async function rollupStatus(db: D1Database, now: number): Promise<RollupStatus> {
+  const cutoff = rollupCutoff(now);
+  const counts = await db.batch<{ n: number }>(RAW_TABLES.map((t) => db.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ts < ?`).bind(cutoff)));
+  const newest = await db.prepare("SELECT MAX(bucket_ts) AS b FROM hourly_power").first<{ b: number | null }>();
+  const oldest = await db.prepare("SELECT MIN(ts) AS t FROM power_samples").first<{ t: number | null }>();
+  return { cutoff, raw_rows_past_cutoff: counts.reduce((n, r) => n + Number(r.results[0]?.n ?? 0), 0), newest_hourly_bucket: newest?.b ?? null, oldest_raw_ts: oldest?.t ?? null };
+}
 
 export async function readVisits(db: D1Database, q: { from: number; to: number; station?: string | null; train?: string | null }): Promise<Visit[]> {
   const where: string[] = [], params: unknown[] = [q.from, q.to];

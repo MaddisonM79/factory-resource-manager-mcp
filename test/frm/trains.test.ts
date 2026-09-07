@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { trainsReport } from "../../src/frm/trains.ts";
+import { trainsReport, signalAspect } from "../../src/frm/trains.ts";
+import { signal } from "../fixtures.ts";
 
 const wagon = (item: string, amount: number) => ({ Name: "Freight Car", ClassName: "BP_FreightWagon_C", TotalMass: 100000, PayloadMass: 70000, MaxPayloadMass: 70000, Inventory: [{ Name: item, Amount: amount, MaxAmount: 500 }] });
 const loco = { Name: "Electric Locomotive", ClassName: "BP_Locomotive_C", TotalMass: 300000, PayloadMass: 0, MaxPayloadMass: 0, Inventory: [] };
@@ -52,4 +53,24 @@ test("errors: derailed, pending derail, autopilot and path errors, tripped fuse,
   assert.deepEqual(t.errors, ["derailed", "derail pending", "autopilot: NoPath", "path: NoPath", "fuse tripped", "no timetable"]);
   assert.equal(t.nextStop, null);
   assert.equal(r.counts.derailed, 1);
+});
+
+test("signals: FRM 1.5's mislabelled aspects are mapped, correct names pass through, problems sort first", () => {
+  assert.equal(signalAspect("Valid"), "Clear");
+  assert.equal(signalAspect("No Exit Signal"), "Stop");
+  assert.equal(signalAspect("Contains Loop"), "Dock");
+  assert.equal(signalAspect("Unvalidated"), "None");
+  assert.equal(signalAspect("Stop"), "Stop", "a fixed FRM already says Stop");
+  assert.equal(signalAspect("RSA_Dock"), "Dock");
+  // A shipping build of the game strips display names: the live payload carries raw enum names.
+  assert.equal(signalAspect("RBV_NoExitSignals"), "Stop");
+  assert.equal(signalAspect("RBV_Valid"), "Clear");
+  const live = trainsReport([], [], [signal("L1", "RBV_NoExitSignals", "RBV_Valid", "Build_RailroadPathSignal_C"), signal("L2", "RBV_Valid", "RBV_ContainsLoop")]);
+  assert.deepEqual(live.signals.map((s) => [s.id, s.aspect, s.block, s.blockOk]), [["L2", "Clear", "Contains Loop", false], ["L1", "Stop", "Valid", true]]);
+  const r = trainsReport([], [], [
+    signal("S1", "Valid"), signal("S2", "No Exit Signal"), signal("S3", "Valid", "Contains Loop", "Build_RailroadPathSignal_C"), signal("S4", "Clear", "Valid"),
+  ]);
+  assert.deepEqual(r.signals.map((s) => [s.id, s.kind, s.aspect, s.blockOk]), [["S3", "path", "Clear", false], ["S2", "block", "Stop", true], ["S1", "block", "Clear", true], ["S4", "block", "Clear", true]]);
+  assert.deepEqual([r.counts.signals, r.counts.signalsStop, r.counts.invalidBlocks], [4, 1, 1]);
+  assert.deepEqual(trainsReport([], []).signals, [], "no getTrainSignals: empty, not an error");
 });

@@ -11,20 +11,81 @@ import {
   pt,
   inBox,
   round,
+  type Pt,
 } from "../../frm/client.ts";
 
 import { pipeReport } from "../pipes.ts";
+import { signalRows } from "../../frm/trains.ts";
 import { guard, inv } from "../shared.ts";
 
 const BELT_CAP: Record<number, number> = { 1: 60, 2: 120, 3: 270, 4: 480, 5: 780, 6: 1200 };
 const beltTier = (b: any) => num((String(b.ClassName ?? "").match(/Mk(\d)/) ?? [])[1]);
+
+const countBy = <T,>(items: T[], keyOf: (t: T) => string): Record<string, number> => {
+  const out: Record<string, number> = {};
+  for (const i of items) { const k = keyOf(i); out[k] = (out[k] ?? 0) + 1; }
+  return out;
+};
+
+/** A counter sits on a belt: the nearest belt whose spline (or an end) passes within this many cm. */
+const COUNTER_SNAP_CM = 400;
+
+export interface CounterReportRow {
+  id: string; name: string;
+  beltId: string | null; beltTier: number | null; capPerMin: number;
+  measuredPerMin: number; utilizationPct: number | null; confidencePct: number;
+  saturated: boolean;
+  /** machine the belt feeds (its end) or drains (its start), when an end sits in a machine's bounding box */
+  feeds: string | null; drains: string | null;
+  location: string;
+}
+
+/**
+ * Throughput counters (getThroughputCounter) matched to belts by position: FRM names the belt's class
+ * and cap but not its ID. Measured flow is FRM's CalculatedAverage; Confidence is FRM's 0..100.
+ */
+export function counterReport(counters: any[], belts: any[], machines: any[], saturatedPct: number): CounterReportRow[] {
+  const nearest = (p: Pt): any | null => {
+    let best: any = null, bd = COUNTER_SNAP_CM;
+    for (const b of belts) {
+      const pts = [b.location0, b.location1, ...asArray(b.SplineData)].map(pt).filter((x): x is Pt => !!x);
+      for (const q of pts) {
+        const d = Math.hypot(q.x - p.x, q.y - p.y, q.z - p.z);
+        if (d < bd) { bd = d; best = b; }
+      }
+    }
+    return best;
+  };
+  const machineAt = (p: Pt | null) => (p ? machines.find((m) => inBox(p, m.BoundingBox, 120)) : null);
+  return counters.map((c) => {
+    const p = pt(c);
+    const belt = p ? nearest(p) : null;
+    const cap = num(c.Belt?.ItemsPerMinute) || (belt ? num(belt.ItemsPerMinute) || BELT_CAP[beltTier(belt)] || 0 : 0);
+    const measured = num(c.CalculatedAverage);
+    const confidence = num(c.Confidence);
+    const util = cap ? (measured / cap) * 100 : null;
+    const feeds = belt ? machineAt(pt(belt.location1)) : null, drains = belt ? machineAt(pt(belt.location0)) : null;
+    return {
+      id: String(c.ID ?? ""), name: String(c.Name ?? ""),
+      beltId: belt ? String(belt.ID) : null, beltTier: belt ? beltTier(belt) : (num((String(c.Belt?.ClassName ?? "").match(/Mk(\d)/) ?? [])[1]) || null),
+      capPerMin: cap, measuredPerMin: round(measured, 2), utilizationPct: util == null ? null : round(util), confidencePct: round(confidence),
+      saturated: util != null && util >= saturatedPct && confidence >= 50,
+      feeds: feeds ? `${feeds.Name} (${feeds.Recipe ?? "no recipe"}) ${feeds.ID}` : null,
+      drains: drains ? `${drains.Name} (${drains.Recipe ?? "no recipe"}) ${drains.ID}` : null,
+      location: loc(c),
+    };
+  }).sort((a, b) => (b.utilizationPct ?? -1) - (a.utilizationPct ?? -1));
+}
 
 export function registerLogistics(server: McpServer, env: Env): void {
   server.registerTool(
     "logistics_status",
     {
       description:
-        "Trains, drones, trucks and their stations: where each vehicle is, what it's carrying, per-platform load/unload state, and anything derailed or stuck.",
+        "Trains, drones, trucks and their stations: where each vehicle is, what it's carrying, per-platform load/unload state, and anything derailed or stuck. " +
+        "Trains also bring rail signals: aspect (Clear/Stop/Dock) and block validity, invalid blocks first. " +
+        "Drone ports carry FRM's own telemetry: status, averaged items/min in and out, estimated transport rate, round-trip times, items per trip, " +
+        "and the active fuel's cost per trip, so 'is this route keeping up?' is answered with numbers.",
       inputSchema: z.object({
         include: z.array(z.enum(["trains", "drones", "trucks"])).default(["trains", "drones"]),
         limit: z.number().int().min(1).max(200).default(40),
@@ -34,7 +95,9 @@ export function registerLogistics(server: McpServer, env: Env): void {
       guard(async () => {
         const out: Record<string, unknown> = {};
         if (include.includes("trains")) {
-          const [trains, stations] = await Promise.all([frmGet(env, "getTrains"), frmGet(env, "getTrainStation")]);
+          const [trains, stations, signalsRaw] = await Promise.all([
+            frmGet(env, "getTrains"), frmGet(env, "getTrainStation"), frmGet(env, "getTrainSignals").catch(() => null),
+          ]);
           out.trains = asArray(trains).slice(0, limit).map((t) => {
             // Cargo lives on each wagon under Vehicles[].Inventory; roll it up by item.
             const cargo = new Map<string, number>();
@@ -67,6 +130,15 @@ export function registerLogistics(server: McpServer, env: Env): void {
               inventory: inv(p.Inventory),
             })),
           }));
+          const signals = signalRows(signalsRaw);
+          const problems = signals.filter((s) => !s.blockOk || s.aspect === "Stop");
+          out.signals = {
+            total: signals.length,
+            byAspect: countBy(signals, (s) => s.aspect),
+            invalidBlocks: signals.filter((s) => !s.blockOk).length,
+            rows: (problems.length ? problems : signals).slice(0, limit),
+            note: signals.length ? (problems.length ? "rows are the invalid blocks and Stop aspects" : "every block is valid and no signal shows Stop; rows are all signals") : "no signals (none built, or FRM predates getTrainSignals)",
+          };
         }
         if (include.includes("drones")) {
           const [drones, ports] = await Promise.all([frmGet(env, "getDrone"), frmGet(env, "getDroneStation")]);
@@ -74,15 +146,34 @@ export function registerLogistics(server: McpServer, env: Env): void {
             name: d.Name,
             status: d.CurrentFlyingMode ?? d.Status,
             home: d.HomeStation,
-            destination: d.PairedStation ?? d.Destination,
+            paired: d.PairedStation ?? d.Destination,
+            destination: d.CurrentDestination ?? null,
+            hasPairedStation: d.HasPairedStation ?? null,
+            speed: round(num(d.FlyingSpeed)), maxSpeed: round(num(d.MaxSpeed)),
             location: loc(d),
           }));
+          const fuel = (f: any) => f && f.FuelName ? {
+            name: f.FuelName, perTrip: round(num(f.SingleTripFuelCost), 2), perMin: round(num(f.EstimatedFuelCostRate), 3),
+            estItemsPerMin: round(num(f.EstimatedTransportRate), 2), estRoundTripS: round(num(f.EstimatedRoundTripTime)),
+          } : null;
           out.droneStations = asArray(ports).slice(0, limit).map((p) => ({
             name: p.Name,
-            paired: p.PairedStation,
-            fuel: p.FuelInventory ?? p.Fuel,
+            paired: p.PairedStation === "None" ? null : p.PairedStation,
+            status: p.DroneStatus ?? null,
+            fuel: inv(p.FuelInventory),
             input: inv(p.InputInventory),
             output: inv(p.OutputInventory),
+            // FRM's averaged rates for this port (items/min) and per-trip amounts.
+            rates: {
+              inPerMin: round(num(p.AvgTotalIncRate ?? p.AvgIncRate), 2), outPerMin: round(num(p.AvgTotalOutRate ?? p.AvgOutRate), 2),
+              estTotalPerMin: round(num(p.EstTotalTransRate), 2),
+              inPerTrip: { avg: round(num(p.AvgTripIncAmt)), median: round(num(p.MedianTripIncAmt)), latest: round(num(p.LatestTripIncAmt)) },
+              outPerTrip: { avg: round(num(p.AvgTripOutAmt)), median: round(num(p.MedianTripOutAmt)), latest: round(num(p.LatestTripOutAmt)) },
+            },
+            roundTrip: { avg: p.AvgRndTrip ?? null, median: p.MedianRndTrip ?? null, latestS: round(num(p.LatestRndTrip)) },
+            activeFuel: fuel(p.ActiveFuel),
+            fuelOptions: asArray(p.FuelInfo).map(fuel).filter(Boolean),
+            fuseTripped: !!p.PowerInfo?.FuseTriggered,
             location: loc(p),
           }));
         }
@@ -150,22 +241,28 @@ export function registerLogistics(server: McpServer, env: Env): void {
     {
       description:
         "Conveyor belts by tier: count, cap (items/min), total length, dangling ends, and belts too slow for the machine they feed or drain. " +
-        "FRM does not expose live belt throughput (its ItemsPerMinute is just the tier cap), so saturation is inferred: a belt whose end sits in a machine's " +
+        "A belt's ItemsPerMinute in FRM is just the tier cap; measured flow exists only where a Throughput Counter is built (getThroughputCounter). " +
+        "Every counter is reported with its measured items/min, the cap of the belt it sits on, utilisation, and FRM's confidence in the average; " +
+        "saturated means at or above saturated_pct of the cap with confidence of at least 50 %. Elsewhere saturation is inferred: a belt whose end sits in a machine's " +
         "bounding box is compared against that machine's max input/output rate (worst-case ingredient). " +
         "bbox is in map units (cm, the same numbers as every location in these tools).",
       inputSchema: z.object({
         bbox: z.object({ min_x: z.number(), min_y: z.number(), max_x: z.number(), max_y: z.number() }).optional(),
         tier: z.number().int().min(1).max(6).optional(),
-        only_problems: z.boolean().default(false).describe("skip the per-tier summary and dangling list; just the too-slow belts"),
+        only_problems: z.boolean().default(false).describe("skip the per-tier summary and dangling list; just the too-slow belts and saturated counters"),
+        saturated_pct: z.number().min(1).max(100).default(95).describe("a counter at or above this % of its belt's cap is saturated"),
         limit: z.number().int().min(1).max(300).default(50),
       }),
     },
-    async ({ bbox, tier, only_problems, limit }) =>
+    async ({ bbox, tier, only_problems, saturated_pct, limit }) =>
       guard(async () => {
-        const [beltsRaw, factory] = await Promise.all([frmGet(env, "getBelts"), frmGet(env, "getFactory")]);
+        const [beltsRaw, factory, countersRaw] = await Promise.all([
+          frmGet(env, "getBelts"), frmGet(env, "getFactory"), frmGet(env, "getThroughputCounter").catch(() => null),
+        ]);
         const inB = (p: any) => !bbox || (num(p?.x) >= bbox.min_x && num(p?.x) <= bbox.max_x && num(p?.y) >= bbox.min_y && num(p?.y) <= bbox.max_y);
         const belts = asArray(beltsRaw).filter((b) => (!tier || beltTier(b) === tier) && (inB(b.location0) || inB(b.location1)));
         const machines = asArray(factory).filter((m) => m.BoundingBox);
+        const counters = counterReport(asArray(countersRaw).filter((c) => inB(c.location)), belts, machines, saturated_pct);
 
         const tiers: Record<string, any> = {};
         const dangling: any[] = [];
@@ -192,7 +289,13 @@ export function registerLogistics(server: McpServer, env: Env): void {
         }
         for (const s of Object.values(tiers)) s.totalLengthM = Math.round(s.totalLengthM);
         const sorted = tooSlow.sort((a, b) => b.machineRatePerMin - b.capPerMin - (a.machineRatePerMin - a.capPerMin));
-        const base = { beltsConsidered: belts.length, tooSlow: { count: sorted.length, rows: sorted.slice(0, limit) } };
+        const base = {
+          beltsConsidered: belts.length,
+          tooSlow: { count: sorted.length, rows: sorted.slice(0, limit) },
+          counters: only_problems
+            ? { total: counters.length, saturated: counters.filter((c) => c.saturated).length, rows: counters.filter((c) => c.saturated).slice(0, limit) }
+            : { total: counters.length, saturated: counters.filter((c) => c.saturated).length, rows: counters.slice(0, limit), note: countersRaw == null ? "getThroughputCounter unavailable (FRM predates it)" : counters.length ? "measured items/min from FRM's conveyor monitors; utilisation is against the belt's tier cap" : "no throughput counters built" },
+        };
         return only_problems ? base : { ...base, tiers: Object.values(tiers).sort((a: any, b: any) => a.tier - b.tier), dangling: { count: belts.filter((b) => b.Connected0 === false || b.Connected1 === false).length, rows: dangling } };
       }),
   );

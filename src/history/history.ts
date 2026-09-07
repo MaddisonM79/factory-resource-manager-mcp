@@ -31,6 +31,9 @@ export interface Snapshot {
   stations?: unknown | null;
   trains?: unknown | null;
   schematics?: unknown | null;
+  droneStations?: unknown | null;
+  /** getThroughputCounter: the conveyor monitors the player has placed */
+  counters?: unknown | null;
 }
 
 // ---------------------------------------------------------------- state (KV)
@@ -166,6 +169,10 @@ export interface GenRow {
   fuel_type: string; field_id: number | null;
   center_x: number | null; center_y: number | null; center_z: number | null;
   total: number; fueled: number; dry: number; capacity_mw: number;
+  /** mean of FRM's LoadPercentage over the generators in the row; null when FRM does not report it */
+  load_pct: number | null;
+  /** nuclear waste sitting in output inventories (WasteInventory), summed; 0 for anything that is not nuclear */
+  waste: number;
 }
 
 /** "Build_GeneratorCoal_C" -> "Coal", "Build_GeneratorIntegratedBiomass_C" -> "Biomass"; falls back to the display name. */
@@ -200,29 +207,89 @@ export function isFueled(g: any): boolean {
 export const genCapacityMw = (g: any): number =>
   num(g?.ProductionCapacity) || num(g?.PowerProductionPotential) || num(g?.BaseProd) + num(g?.DynamicProdCapacity);
 
+/** Nuclear waste in the generator's output inventory; every other generator reports an empty list. */
+export const genWaste = (g: any): number => asArray(g?.WasteInventory).reduce((n: number, i: any) => n + num(i?.Amount ?? i?.amount), 0);
+
+/** FRM's LoadPercentage (0..100), or null when the field is absent (older FRM). */
+export const genLoadPct = (g: any): number | null => (typeof g?.LoadPercentage === "number" ? g.LoadPercentage : null);
+
 /** One row per (fuel type, spatial cluster) with field_id null, plus one map-wide row per fuel type with field_id 0. */
 export function genRows(generators: unknown, radiusCm = CLUSTER_RADIUS_CM): GenRow[] {
   const gens = asArray(generators).map((g) => ({ item: g, p: pt(g)! })).filter((x) => x.p);
   const out: GenRow[] = [];
   const mapWide = new Map<string, GenRow>();
+  const loads = new Map<GenRow, number[]>();
   const tally = (row: GenRow, g: any) => {
     row.total++;
     if (isFueled(g)) row.fueled++; else row.dry++;
     row.capacity_mw += genCapacityMw(g);
+    row.waste += genWaste(g);
+    const l = genLoadPct(g);
+    if (l != null) loads.set(row, [...(loads.get(row) ?? []), l]);
   };
   for (const c of cluster(gens, radiusCm)) {
     const byFuel = new Map<string, GenRow>();
     for (const g of c.members) {
       const ft = fuelTypeOf(g);
       let row = byFuel.get(ft);
-      if (!row) { row = { fuel_type: ft, field_id: null, center_x: c.cx, center_y: c.cy, center_z: c.cz, total: 0, fueled: 0, dry: 0, capacity_mw: 0 }; byFuel.set(ft, row); out.push(row); }
+      if (!row) { row = { fuel_type: ft, field_id: null, center_x: c.cx, center_y: c.cy, center_z: c.cz, total: 0, fueled: 0, dry: 0, capacity_mw: 0, load_pct: null, waste: 0 }; byFuel.set(ft, row); out.push(row); }
       tally(row, g);
       let mw = mapWide.get(ft);
-      if (!mw) { mw = { fuel_type: ft, field_id: 0, center_x: null, center_y: null, center_z: null, total: 0, fueled: 0, dry: 0, capacity_mw: 0 }; mapWide.set(ft, mw); }
+      if (!mw) { mw = { fuel_type: ft, field_id: 0, center_x: null, center_y: null, center_z: null, total: 0, fueled: 0, dry: 0, capacity_mw: 0, load_pct: null, waste: 0 }; mapWide.set(ft, mw); }
       tally(mw, g);
     }
   }
-  return [...out, ...mapWide.values()];
+  const rows = [...out, ...mapWide.values()];
+  for (const r of rows) { const l = loads.get(r); if (l?.length) r.load_pct = l.reduce((a, b) => a + b, 0) / l.length; }
+  return rows;
+}
+
+// ---------------------------------------------------------------- drone stations
+
+export interface DroneRow {
+  station: string; paired: string | null; status: string;
+  /** FRM's averaged item rates (items/min) for this port: incoming, outgoing, and its estimate of the total transport rate */
+  in_per_min: number; out_per_min: number; est_per_min: number;
+  /** seconds for the most recent round trip */
+  round_trip_s: number;
+  /** average items moved per trip, in and out */
+  trip_in: number; trip_out: number;
+  fuel: number; input_stock: number; output_stock: number;
+}
+
+const invTotal = (items: unknown) => asArray(items).reduce((n: number, i: any) => n + num(i?.Amount ?? i?.amount), 0);
+
+/** One row per drone port from getDroneStation. "None" pairing is null. */
+export function droneRows(droneStations: unknown): DroneRow[] {
+  return asArray(droneStations).map((p) => ({
+    station: String(p.Name ?? p.ID ?? ""),
+    paired: p.PairedStation && p.PairedStation !== "None" ? String(p.PairedStation) : null,
+    status: String(p.DroneStatus ?? ""),
+    in_per_min: num(p.AvgTotalIncRate ?? p.AvgIncRate), out_per_min: num(p.AvgTotalOutRate ?? p.AvgOutRate), est_per_min: num(p.EstTotalTransRate),
+    round_trip_s: num(p.LatestRndTrip),
+    trip_in: num(p.AvgTripIncAmt), trip_out: num(p.AvgTripOutAmt),
+    fuel: invTotal(p.FuelInventory), input_stock: invTotal(p.InputInventory), output_stock: invTotal(p.OutputInventory),
+  }));
+}
+
+// ---------------------------------------------------------------- throughput counters
+
+export interface CounterRow {
+  counter_id: string; name: string; belt: string;
+  /** the belt's tier cap (items/min) */
+  cap_per_min: number;
+  /** FRM's CalculatedAverage: measured items/min through the counter */
+  items_per_min: number;
+  /** FRM's Confidence, 0..100 */
+  confidence: number;
+}
+
+/** One row per conveyor monitor from getThroughputCounter. The belt it sits on is identified by class only. */
+export function counterRows(counters: unknown): CounterRow[] {
+  return asArray(counters).map((c) => ({
+    counter_id: String(c.ID ?? ""), name: String(c.Name ?? ""), belt: String(c.Belt?.ClassName ?? c.Belt?.Name ?? ""),
+    cap_per_min: num(c.Belt?.ItemsPerMinute), items_per_min: num(c.CalculatedAverage), confidence: num(c.Confidence),
+  }));
 }
 
 // ---------------------------------------------------------------- depot / prod / sinks
@@ -391,6 +458,8 @@ export interface Tick {
   prod: ProdRow[];
   station: StationRow[];
   sink: SinkRow[];
+  drone: DroneRow[];
+  counter: CounterRow[];
   visitOpens: VisitOpen[];
   visitCloses: VisitClose[];
   /** first live tick only: coordinates for lookup rows that still have none */
@@ -440,6 +509,8 @@ export function buildTick(snap: Snapshot, prev: HistoryState, ts = Math.floor(sn
     depot: snap.cloud != null ? depotRows(snap.cloud, snap.schematics) : [],
     prod: snap.prodStats != null ? prodRows(snap.prodStats) : [],
     station, sink,
+    drone: snap.droneStations != null ? droneRows(snap.droneStations) : [],
+    counter: snap.counters != null ? counterRows(snap.counters) : [],
     visitOpens: opens, visitCloses: closes,
     seedSites, seedFields,
     state: {

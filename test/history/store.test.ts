@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { d1 } from "../d1.ts";
-import { snapshot, station, train, sink, machine, M } from "../fixtures.ts";
+import { snapshot, station, train, sink, machine, dronePort, counter, M } from "../fixtures.ts";
 import { buildTick, gapState, initialState, HOUR, RAW_RETENTION_SECONDS, type HistoryState } from "../../src/history/history.ts";
-import { writeTick, writeGap, rollup, readSeries, readVisits, listLookup, updateLookup, rollupCutoff } from "../../src/history/store.ts";
+import { writeTick, writeGap, rollup, readSeries, readVisits, readLatest, listLookup, insertLookup, updateLookup, rollupCutoff, tableStats, epochs, recentGaps, rollupStatus } from "../../src/history/store.ts";
 
 const T0 = 1_700_000_000;
 
@@ -21,7 +21,7 @@ async function drive(db: D1Database, ticks: ({ ts: number } & ({ gap: string } |
 test("a good tick writes every table in one batch; a gap tick writes only gap_samples", async () => {
   const db = d1();
   await drive(db, [{ ts: T0, snap: {} }, { ts: T0 + 300, gap: "FRM origin unreachable (530)" }]);
-  for (const t of ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples"]) {
+  for (const t of ["power_samples", "site_samples", "gen_samples", "depot_samples", "prod_samples", "station_samples", "sink_samples", "drone_samples", "counter_samples"]) {
     assert.equal(db.count(t), db.count(t, "ts = ?", T0), `${t}: nothing written on the gap tick`);
     assert.ok(db.count(t) > 0, `${t} has rows`);
   }
@@ -117,7 +117,7 @@ test("rollup is idempotent, keeps gap rows, counts gaps into the bucket, and del
   assert.equal(db.count("gap_samples"), 1, "gap rows are never rolled or deleted");
   assert.equal(db.count("power_samples"), 1, "only the recent raw tick remains");
   assert.deepEqual(db.rows("SELECT stock, stock_min, stock_max, is_full FROM hourly_depot WHERE bucket_ts = ?", old + HOUR), [{ stock: 50, stock_min: 10, stock_max: 90, is_full: 0 }]);
-  for (const t of ["hourly_site", "hourly_gen", "hourly_prod", "hourly_station", "hourly_sink"]) assert.ok(db.count(t) > 0, `${t} rolled`);
+  for (const t of ["hourly_site", "hourly_gen", "hourly_prod", "hourly_station", "hourly_sink", "hourly_drone", "hourly_counter"]) assert.ok(db.count(t) > 0, `${t} rolled`);
   assert.equal(db.count("hourly_gen", "field_id = 0"), 4, "map-wide rows per fuel type, per bucket");
   assert.equal(db.count("hourly_gen", "field_id = -1"), 4, "cluster rows (resolved on read), per bucket");
 
@@ -177,4 +177,71 @@ test("hourly site rows are merged per bucket after resolution", async () => {
   assert.equal(s.points.length, 1);
   assert.equal(s.points[0].sample_count, 2);
   assert.equal(s.points[0].machines, 2);
+});
+
+test("drone and counter series: raw per station / counter, hourly with min and max, 'all' returns every key", async () => {
+  const db = d1();
+  const now = T0 + 30 * 24 * HOUR;
+  const old = rollupCutoff(now) - 3 * HOUR;
+  await drive(db, [
+    { ts: old, snap: { play: 1, droneStations: [dronePort("A", "B", { inRate: 60, fuel: 20 })], counters: [counter("CM-1", 0, 0, 100)] } },
+    { ts: old + 300, snap: { play: 2, droneStations: [dronePort("A", "B", { inRate: 120, fuel: 10 })], counters: [counter("CM-1", 0, 0, 300)] } },
+    { ts: now - 300, snap: { play: 99_000, droneStations: [dronePort("A", "B", { inRate: 90 }), dronePort("B", "A")], counters: [counter("CM-1", 0, 0, 200), counter("CM-2", 0, 0, 50)] } },
+  ]);
+  const [a] = await readSeries(db, { kind: "drone", key: "a", from: now - 600, to: now, res: "raw" });
+  assert.deepEqual(a.points.map((p) => [p.station, p.in_per_min, p.paired]), [["A", 90, "B"]], "station key is case-insensitive");
+  const [all] = await readSeries(db, { kind: "drone", key: "all", from: now - 600, to: now, res: "raw" });
+  assert.deepEqual(all.points.map((p) => p.station), ["A", "B"]);
+  const [c] = await readSeries(db, { kind: "counter", key: "CM-2", from: now - 600, to: now, res: "raw" });
+  assert.deepEqual(c.points.map((p) => [p.counter_id, p.items_per_min, p.cap_per_min]), [["CM-2", 50, 270]]);
+
+  await rollup(db, now);
+  const [hd] = await readSeries(db, { kind: "drone", key: "A", from: old, to: old + HOUR, res: "hourly" });
+  assert.deepEqual(hd.points.map((p) => [p.sample_count, p.in_per_min, p.fuel, p.fuel_min]), [[2, 90, 15, 10]]);
+  const [hc] = await readSeries(db, { kind: "counter", key: "CM-1", from: old, to: old + HOUR, res: "hourly" });
+  assert.deepEqual(hc.points.map((p) => [p.items_per_min, p.items_min, p.items_max]), [[200, 100, 300]]);
+  const latest = await readLatest(db);
+  assert.deepEqual(latest.drones.map((r) => r.station), ["A", "B"]);
+  assert.deepEqual(latest.counters.map((r) => r.counter_id), ["CM-1", "CM-2"]);
+  assert.ok(latest.gens.every((g) => "load_pct" in g && "waste" in g), "generator rows carry load and waste");
+});
+
+test("admin queries: table stats, epochs with gap counts, recent gaps, and rollup status before and after a rollup", async () => {
+  const db = d1();
+  const now = T0 + 30 * 24 * HOUR;
+  const old = rollupCutoff(now) - 2 * HOUR;
+  await drive(db, [
+    { ts: old, snap: { play: 1 } }, { ts: old + 300, gap: "down" }, { ts: old + 600, snap: { play: 7 } },
+    { ts: now - 600, snap: { play: 3, name: "Other Save" } }, { ts: now - 300, snap: { play: 6, name: "Other Save" } },
+  ]);
+  const stats = await tableStats(db);
+  const power = stats.find((t) => t.table === "power_samples")!;
+  assert.deepEqual([power.rows, power.oldest, power.newest], [4, old, now - 300]);
+  assert.equal(stats.find((t) => t.table === "gap_samples")!.rows, 1);
+  assert.ok(stats.some((t) => t.table === "hourly_counter"), "every hourly table is listed");
+
+  let ep = await epochs(db);
+  assert.deepEqual(ep.map((e) => [e.epoch, e.session, e.ticks, e.gaps]), [[2, "Other Save", 2, 0], [1, "Save A", 2, 1]]);
+  assert.deepEqual((await recentGaps(db)).map((g) => [g.ts, g.epoch, g.reason]), [[old + 300, 1, "down"]]);
+
+  let rs = await rollupStatus(db, now);
+  assert.ok(rs.raw_rows_past_cutoff > 0, "raw rows older than the cutoff are pending");
+  assert.equal(rs.newest_hourly_bucket, null);
+  await rollup(db, now);
+  rs = await rollupStatus(db, now);
+  assert.equal(rs.raw_rows_past_cutoff, 0);
+  assert.equal(rs.newest_hourly_bucket, Math.floor((old + 600) / HOUR) * HOUR);
+  ep = await epochs(db);
+  assert.deepEqual(ep.map((e) => [e.epoch, e.ticks, e.gaps]), [[2, 2, 0], [1, 2, 1]], "epoch 1 survives in the hourly table after its raw rows are rolled");
+});
+
+test("lookup rows can be added without coordinates and have them cleared for re-seeding", async () => {
+  const db = d1();
+  const row = await insertLookup(db, "sites", { name: "New Site" });
+  assert.equal(row.id, 12); assert.equal(row.x, null);
+  const cleared = await updateLookup(db, "sites", 1, { x: null, y: null, z: null });
+  assert.deepEqual([cleared!.x, cleared!.y, cleared!.z], [null, null, null]);
+  await drive(db, [{ ts: T0, snap: {} }]);
+  const after = await listLookup(db, "sites");
+  assert.ok(after.find((s) => s.id === 1)!.x != null, "the cleared row is re-seeded by the next live tick");
 });

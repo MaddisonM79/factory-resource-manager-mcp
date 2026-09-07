@@ -3,6 +3,7 @@
 
 import { McpServer } from "@modelcontextprotocol/server";
 import type { Env } from "../frm/client.ts";
+import { SERVER_VERSION } from "../version.ts";
 import { registerRaw } from "./tools/raw.ts";
 import { registerPower } from "./tools/power.ts";
 import { registerFactory } from "./tools/factory.ts";
@@ -12,7 +13,7 @@ import { registerTrend } from "./tools/trend.ts";
 import { registerWrite } from "./tools/write.ts";
 
 export function buildServer(env: Env): McpServer {
-  const server = new McpServer({ name: "frm", version: "0.3.0" });
+  const server = new McpServer({ name: "frm", version: SERVER_VERSION });
   registerRaw(server, env);
   registerPower(server, env);
   registerFactory(server, env);
