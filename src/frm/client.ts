@@ -132,7 +132,8 @@ export async function frmPost(env: Env, endpoint: WriteEndpoint, body: unknown):
     ...accessHeaders(env),
     "Content-Type": "application/json",
   };
-  if (env.FRM_API_KEY) headers["Authorization"] = env.FRM_API_KEY;
+  // FRM reads its token from x-frm-authorization and compares it raw (no "Bearer"); Authorization is ignored.
+  if (env.FRM_API_KEY) headers["X-FRM-Authorization"] = env.FRM_API_KEY;
   const res = await doFetch(`${env.FRM_BASE_URL}/${endpoint}`, {
     method: "POST",
     headers,
