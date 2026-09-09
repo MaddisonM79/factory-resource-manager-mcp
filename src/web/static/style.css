@@ -197,3 +197,16 @@ input.inline.name { width: 100%; min-width: 160px; }
 .lookup-row.head { color: var(--ink-2); font-size: 12px; }
 .lookup-row.add { margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--grid); grid-template-columns: 40px 1fr auto; }
 @media (max-width: 900px) { .lookup-row { grid-template-columns: 40px 1fr; } .lookup-row.head { display: none; } }
+
+/* ---- global alert strip: under the tabs on every page, hidden when there is nothing to say */
+.alerts { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 8px 20px; border-top: 1px solid var(--border); background: color-mix(in srgb, var(--critical) 6%, var(--surface)); }
+.alerts.quiet { background: color-mix(in srgb, var(--warning) 8%, var(--surface)); }
+.alerts .count { font-size: 12px; color: var(--ink-2); margin-right: 4px; white-space: nowrap; }
+.alert { display: inline-flex; gap: 6px; align-items: baseline; max-width: 100%; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; background: var(--surface); font-size: 13px; cursor: pointer; text-align: left; color: var(--ink); }
+.alert.bad { border-color: var(--critical); }
+.alert.warn { border-color: var(--warning); }
+.alert .t { font-weight: 600; white-space: nowrap; }
+.alert.bad .t { color: var(--critical); }
+.alert .d { color: var(--ink-2); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert:hover .d { white-space: normal; }
+.pill.overdue { border-color: var(--critical); color: var(--critical); }

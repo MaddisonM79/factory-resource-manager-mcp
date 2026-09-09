@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { d1 } from "../d1.ts";
 import { snapshot, station, train, sink, machine, dronePort, counter, M } from "../fixtures.ts";
 import { buildTick, gapState, initialState, HOUR, RAW_RETENTION_SECONDS, type HistoryState } from "../../src/history/history.ts";
-import { writeTick, writeGap, rollup, readSeries, readVisits, readLatest, listLookup, insertLookup, updateLookup, rollupCutoff, tableStats, epochs, recentGaps, rollupStatus } from "../../src/history/store.ts";
+import { writeTick, writeGap, rollup, readSeries, readVisits, readLatest, readTrainCadence, listLookup, insertLookup, updateLookup, rollupCutoff, tableStats, epochs, recentGaps, rollupStatus } from "../../src/history/store.ts";
 
 const T0 = 1_700_000_000;
 
@@ -244,4 +244,24 @@ test("lookup rows can be added without coordinates and have them cleared for re-
   await drive(db, [{ ts: T0, snap: {} }]);
   const after = await listLookup(db, "sites");
   assert.ok(after.find((s) => s.id === 1)!.x != null, "the cleared row is re-seeded by the next live tick");
+});
+
+test("readTrainCadence: median dock interval per train, newest arrival, and gap seconds after it", async () => {
+  const db = d1();
+  const S = (docked: boolean, at = "Out") => ({ stations: [station("Out", 100), station("In", 100)], trains: [train("T1", at, docked)] });
+  // Arrivals at T0+300, +1200, +2400 (intervals 900, 1200), then away; two gap ticks after the last arrival.
+  await drive(db, [
+    { ts: T0, snap: S(false) },
+    { ts: T0 + 300, snap: S(true) }, { ts: T0 + 600, snap: S(false) },
+    { ts: T0 + 1200, snap: S(true, "In") }, { ts: T0 + 1500, snap: S(false) },
+    { ts: T0 + 1800, snap: S(true) }, { ts: T0 + 2100, snap: S(false) },
+    { ts: T0 + 2400, snap: S(true, "In") }, { ts: T0 + 2700, snap: S(false) },
+    { ts: T0 + 3000, gap: "down" }, { ts: T0 + 3300, gap: "down" },
+    { ts: T0 + 3600, snap: S(false) },
+  ]);
+  const { cadence, visits } = await readTrainCadence(db, T0 + 3600);
+  assert.equal(visits, 4);
+  assert.deepEqual(cadence.T1, { train: "T1", last_arrival: T0 + 2400, intervals: 3, usual_s: 600, gap_s: 600 });
+  // Window: nothing older than it counts.
+  assert.deepEqual((await readTrainCadence(db, T0 + 3600, 600)).cadence, {});
 });

@@ -8,8 +8,9 @@ import { Hono } from "hono";
 import { type Env, readSamples, frmGet, asArray, loc, num } from "../frm/client.ts";
 import { RAW_RETENTION_SECONDS, pickRes, type Res } from "../history/history.ts";
 import { emergencyReport } from "../frm/emergency.ts";
-import { trainsReport } from "../frm/trains.ts";
-import { readSeries, readVisits, readLatest, listLookup, insertLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
+import { trainsReport, applyOverdue } from "../frm/trains.ts";
+import { readSeries, readVisits, readLatest, readTrainCadence, listLookup, insertLookup, updateLookup, NotFound, type Series, type SeriesKind } from "../history/store.ts";
+import { collectAlerts } from "./alerts.ts";
 
 export interface SeriesRequest { kind: SeriesKind; key?: string | null; from: number; to: number; res?: string | null }
 
@@ -92,13 +93,19 @@ api.get("/api/emergency", async (c) => {
 
 /** Rail network, live: trains with timetables and cargo, stations with platforms, docked and inbound, signals and their blocks. */
 api.get("/api/trains", async (c) => {
-  const [trains, stations, signals] = await Promise.all([
+  const now = Math.floor(Date.now() / 1000);
+  const [trains, stations, signals, cad] = await Promise.all([
     frmGet(c.env, "getTrains"), frmGet(c.env, "getTrainStation"),
     // Older FRM has no getTrainSignals; the report then simply has no signals.
     frmGet(c.env, "getTrainSignals").catch(() => null),
+    // Dock cadence from D1: a train stuck at a signal looks healthy to FRM, so overdue is judged against history.
+    readTrainCadence(c.env.DB, now),
   ]);
-  return c.json({ now: Math.floor(Date.now() / 1000), ...trainsReport(trains, stations, signals) });
+  return c.json({ now, ...applyOverdue(trainsReport(trains, stations, signals), cad.cadence, now, cad.visits > 0) });
 });
+
+/** The global alert strip: origin, sampler, object pool, trains (derailed, errors, overdue), signals, fuses, dry generators, rollup. */
+api.get("/api/alerts", async (c) => c.json(await collectAlerts(c.env)));
 
 api.get("/api/latest", async (c) => {
   const latest = await readLatest(c.env.DB);

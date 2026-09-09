@@ -45,7 +45,7 @@ service-auth policy. Nothing on the server is exposed to the internet.
 | `factory_problems` | Idle / paused / low-efficiency machines, grouped by building + recipe, with overclock / underclock counts and shards / sloops; `clock` filters on those instead |
 | `production_balance` | Item production vs consumption, deficits first |
 | `find_item` | Which containers hold an item, how much, where |
-| `logistics_status` | Trains with cargo, stations per platform, rail signals (aspect, block validity), trucks, drone ports with FRM's rate / round-trip / fuel telemetry |
+| `logistics_status` | Trains with cargo and errors (including overdue against their own dock cadence), stations per platform, rail signals (aspect, block validity), trucks, drone ports with FRM's rate / round-trip / fuel telemetry |
 | `site_status` | One row per site (spatial cluster, default 200 m): machines by state, MW, buildings, recipes, overclocked / underclocked, shards / sloops |
 | `belt_load` | Belts by tier, dangling ends, belts too slow for the machine they feed or drain, and every Throughput Counter with measured items/min vs the belt's cap |
 | `pipe_load` | Pipes by tier, and every unconnected pipe end classified as phantom (touching a junction, pump, or machine but not joined) or open |
@@ -163,7 +163,8 @@ windows of ≤ 7 days inside raw retention, hourly otherwise.
 ```
 GET /api/status                        live getSessionInfo + getPlayer + getUObjectCount, plus sampler staleness
 GET /api/emergency                     live dark-restart readiness (?min_charge_pct=95)
-GET /api/trains                        live trains (timetable, cargo, errors), stations (platforms, docked, inbound, scheduled), signals (aspect, block validity)
+GET /api/trains                        live trains (timetable, cargo, errors, overdue against their own dock cadence), stations (platforms, docked, inbound, scheduled), signals (aspect, block validity)
+GET /api/alerts                        the global alert strip: origin down, sampler behind, object pool, trains (derailed, errors, overdue), invalid blocks, fuses, peak over capacity, dry generators, late rollup
 GET /api/latest                        newest tick from every table, sites/fields resolved to names
 GET /api/live                          KV ring + staleness_seconds (?minutes=)
 GET /api/series/power                  ?group= for one circuit group
@@ -183,8 +184,18 @@ GET /api/lookup/fields                 POST / PATCH likewise
 A series is `{ epoch, session, res, points: [{ ts, ... }], gaps: [{ from, to }] }`;
 when the window spans epochs you get an array of them. Hourly points add
 `sample_count` and `gap_count`; treat `gap_count > 0` as low confidence.
-Only `/api/status`, `/api/emergency`, `/api/trains` and the admin routes
+Only `/api/status`, `/api/emergency`, `/api/trains`, `/api/alerts` and the admin routes
 reach the FRM tunnel; everything else is served from KV and D1.
+
+**Overdue trains.** FRM reports a train deadlocked at a path signal as
+healthy: speed 0, docking None, autopilot and path `NoError`. The tell is
+time since its last recorded dock. `/api/trains`, `/api/alerts` and the
+`logistics_status` tool read each train's `train_visits` over the last 24 h
+and flag it once it has gone twice its median dock interval (floor 30 min;
+a flat hour with fewer than three intervals) without docking. Sampler gap
+ticks after the last dock are subtracted, so an origin outage does not
+count against the train; docked, derailed, manually driven and
+timetable-less trains are never overdue.
 
 #### Admin API (dashboard host only)
 
@@ -205,7 +216,9 @@ GET    /api/admin/game                   session, players, power switches, chat 
 ## Dashboard
 
 `app.<zone>` serves `src/web/static/`: one page, plain ES module, uPlot for charts,
-no build step. It shows whether the game answered just now (`/api/status`
+no build step. An alert strip under the tabs (from `/api/alerts`, polled
+every minute while the page is visible) lists what needs a human on every
+tab, worst first, and each entry jumps to its tab. It shows whether the game answered just now (`/api/status`
 calls `getSessionInfo` and `getPlayer` live, the one place under `/api` that
 reaches the tunnel), then tabs for power per circuit group, item production
 vs consumption, sites by machine state, generator fields (with load % and
