@@ -64,7 +64,10 @@ export async function writeGap(db: D1Database, state: HistoryState, ts: number, 
 // ---------------------------------------------------------------- rollup
 
 const BUCKET = "(ts / 3600) * 3600";
-const GAPS = "(SELECT COUNT(*) FROM gap_samples g WHERE g.epoch = s.epoch AND g.ts / 3600 = s.ts / 3600)";
+// A range on g.ts (not g.ts / 3600 = ...) so gap_samples_epoch_ts serves it as a seek; the
+// expression form rescanned every gap row of the epoch for each hourly group.
+const S_BUCKET = "(s.ts / 3600) * 3600"; // qualified: a bare ts inside the subquery would bind to g
+const GAPS = `(SELECT COUNT(*) FROM gap_samples g WHERE g.epoch = s.epoch AND g.ts >= ${S_BUCKET} AND g.ts < ${S_BUCKET} + 3600)`;
 const HEAD = `session, epoch, ${BUCKET}, COUNT(*), ${GAPS}, MAX(playtime)`;
 const HEAD_COLS = "session, epoch, bucket_ts, sample_count, gap_count, playtime";
 
