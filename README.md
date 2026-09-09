@@ -29,12 +29,12 @@ Cloudflare Worker  (frm-mcp)             ← this repo
         │  CF-Access service token
         ▼
 Cloudflare Access  →  cloudflared tunnel  →  FRM web server (localhost:8080)
-                                              on the machine running the game
+                                              on the dedicated server
 ```
 
 The Worker never talks to the game directly. It calls FRM's JSON endpoints
 through a Cloudflare Tunnel that is protected by a Cloudflare Access
-service-auth policy. Nothing on the game machine is exposed to the internet.
+service-auth policy. Nothing on the server is exposed to the internet.
 
 ## Tools
 
@@ -249,10 +249,10 @@ dashboard host never touches the OAuth provider.
 
 ## Deploying your own
 
-You need: a Cloudflare account with a zone, Satisfactory with FRM installed,
-and `cloudflared` on the game machine.
+You need: a Cloudflare account with a zone, a Satisfactory dedicated server
+(or the game itself) with FRM installed, and `cloudflared` on that machine.
 
-1. **Tunnel.** Create a Cloudflare Tunnel on the game machine that publishes
+1. **Tunnel.** Create a Cloudflare Tunnel on the server that publishes
    `localhost:8080` to a hostname on your zone, e.g. `frm.example.com`. Keep
    it a first-level subdomain: the tunnel's CNAME relies on Universal SSL,
    which does not cover `a.b.example.com` (Worker custom domains get their
@@ -300,7 +300,10 @@ curl https://<your-worker-host>/.well-known/oauth-authorization-server
 
 ## Security model
 
-- The game machine only exposes FRM on localhost; the tunnel is the only path in.
+- The server only exposes FRM on localhost; the tunnel is the only path in.
+- "FRM origin unreachable" errors name the failing layer: 502 means cloudflared
+  answered but FRM is not listening (server down or mod not loaded); 530 means
+  the tunnel has no connection (cloudflared stopped or the machine offline).
 - Cloudflare Access rejects anything without the service token before it
   reaches the tunnel.
 - The Worker holds the service token as a secret and adds it to every origin

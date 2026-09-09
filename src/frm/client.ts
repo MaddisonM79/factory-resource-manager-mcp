@@ -85,12 +85,21 @@ export class FrmError extends Error {
   }
 }
 
+// The origin is a dedicated server that is meant to run 24/7, so "unreachable" is never
+// "the machine is asleep". The status tells which layer failed:
+//   502          cloudflared answered but nothing listens on FRM's port: the server is down,
+//                still loading the save, or the FRM mod did not load (SML/mod mismatch).
+//   530 / 1033   the tunnel itself has no connection: cloudflared is stopped or the laptop is offline.
+//   503 / 504    Cloudflare could not complete the request in time.
+function unreachableHint(status: number): string {
+  if (status === 502) return "cloudflared is up but FRM is not listening on its port. Is the dedicated server running with the save loaded and the FRM mod active?";
+  if (status === 530) return "the tunnel has no connection. Is cloudflared running on the server (systemctl status cloudflared) and is the laptop online?";
+  return "the request did not complete through the tunnel. Check the server and cloudflared.";
+}
+
 async function handle(res: Response, endpoint: string): Promise<unknown> {
   if (res.status === 502 || res.status === 503 || res.status === 504 || (res.status >= 520 && res.status <= 530)) {
-    throw new FrmError(
-      `FRM origin unreachable (${res.status}). Is Satisfactory running with a save loaded, and is the FRM web server started?`,
-      res.status,
-    );
+    throw new FrmError(`FRM origin unreachable (${res.status}): ${unreachableHint(res.status)}`, res.status);
   }
   if (res.status === 403) {
     throw new FrmError("Cloudflare Access rejected the service token (403).", 403);
@@ -112,7 +121,7 @@ async function doFetch(url: string, init: RequestInit): Promise<Response> {
     return await fetch(url, init);
   } catch (e: any) {
     const why = e?.name === "TimeoutError" ? "timed out after 20s" : (e?.message ?? String(e));
-    throw new FrmError(`FRM origin unreachable (${why}). Is the game machine awake, Satisfactory running with a save loaded, and the FRM web server started?`);
+    throw new FrmError(`FRM origin unreachable (${why}). Is the dedicated server online with cloudflared running, the save loaded, and the FRM web server started?`);
   }
 }
 
