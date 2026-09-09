@@ -4,6 +4,7 @@
 // dock history (dwell, cargo moved) comes from train_visits in D1.
 
 import { asArray, num, loc } from "./client.ts";
+import type { TrainCadence } from "../history/store.ts";
 
 export interface Cargo { name: string; amount: number }
 
@@ -23,6 +24,8 @@ export interface TrainRow {
   timetableIndex: number;
   nextStop: string | null;
   errors: string[];
+  /** set when the train has gone without docking for longer than its own cadence allows; see applyOverdue */
+  overdue: Overdue | null;
   cars: number;
   locomotives: number;
   payloadPct: number | null;
@@ -64,9 +67,19 @@ export interface SignalRow {
   location: string;
 }
 
+export interface Overdue {
+  /** seconds since the last recorded dock, with sampler gaps (origin down) taken out */
+  since_s: number;
+  /** the train's median dock-to-dock interval over the last day, or null when there is no baseline */
+  usual_s: number | null;
+  /** since_s crossed this to be flagged: 2x usual (floor 30 min), or 60 min with no baseline */
+  threshold_s: number;
+  last_arrival: number | null;
+}
+
 export interface TrainsReport {
   counts: {
-    trains: number; moving: number; docked: number; stopped: number; derailed: number; stations: number; platforms: number;
+    trains: number; moving: number; docked: number; stopped: number; derailed: number; overdue: number; stations: number; platforms: number;
     signals: number; signalsStop: number; invalidBlocks: number;
   };
   trains: TrainRow[];
@@ -148,7 +161,7 @@ export function trainRows(trainsRaw: unknown): TrainRow[] {
       station: t.TrainStation ? String(t.TrainStation) : null,
       docking: String(t.Docking ?? "").replace(/^TDS_/, ""),
       timetable, timetableIndex: idx, nextStop: timetable[idx] ?? null,
-      errors, cars: asArray(t.Vehicles).length, locomotives,
+      errors, overdue: null, cars: asArray(t.Vehicles).length, locomotives,
       payloadPct: num(t.MaxPayloadMass) ? Math.round((num(t.PayloadMass) / num(t.MaxPayloadMass)) * 100) : null,
       payloadT: Math.round(num(t.PayloadMass) / 1000), maxPayloadT: Math.round(num(t.MaxPayloadMass) / 1000),
       cargo: [...cargo].map(([name, amount]) => ({ name, amount })).sort((a, b) => b.amount - a.amount),
@@ -193,10 +206,55 @@ export function trainsReport(trainsRaw: unknown, stationsRaw: unknown, signalsRa
   const by = (st: TrainRow["state"]) => trains.filter((t) => t.state === st).length;
   return {
     counts: {
-      trains: trains.length, moving: by("moving"), docked: by("docked"), stopped: by("stopped"), derailed: by("derailed"),
+      trains: trains.length, moving: by("moving"), docked: by("docked"), stopped: by("stopped"), derailed: by("derailed"), overdue: 0,
       stations: stations.length, platforms: stations.reduce((n, s) => n + s.platforms.length, 0),
       signals: signals.length, signalsStop: signals.filter((s) => s.aspect === "Stop").length, invalidBlocks: signals.filter((s) => !s.blockOk).length,
     },
     trains, stations, signals,
   };
+}
+
+// ---------------------------------------------------------------- overdue
+
+export const OVERDUE_FLOOR_S = 30 * 60;
+export const OVERDUE_NO_BASELINE_S = 60 * 60;
+export const OVERDUE_MULTIPLIER = 2;
+
+export const durText = (s: number): string => {
+  const m = Math.round(s / 60);
+  return m >= 60 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, "0")}m` : `${m}m`;
+};
+
+/**
+ * A train that FRM says is fine (no derail, autopilot and path NoError) can still be stuck: two
+ * trains waiting on each other at a path signal report speed 0, Docking None, and nothing else.
+ * The tell is time since its last recorded dock against its own cadence. Docked trains, trains
+ * under manual control, and trains without a timetable are never overdue (the last two carry
+ * their own signal). With no cadence in the window at all the train is judged against a flat
+ * hour, but only once the sampler has recorded visits for other trains (so a fresh database or
+ * a fresh train does not light up every row).
+ */
+export function overdueOf(t: TrainRow, c: TrainCadence | undefined, now: number, recording: boolean): Overdue | null {
+  if (t.state === "docked" || t.derailed || !t.timetable.length || !/self-driving/i.test(t.status)) return null;
+  if (!c) {
+    if (!recording) return null;
+    // No arrival in the window: the window itself is the elapsed time.
+    return { since_s: 24 * 3600, usual_s: null, threshold_s: 24 * 3600, last_arrival: null };
+  }
+  const since = Math.max(0, now - c.last_arrival - c.gap_s);
+  const threshold = c.usual_s == null ? OVERDUE_NO_BASELINE_S : Math.max(OVERDUE_FLOOR_S, OVERDUE_MULTIPLIER * c.usual_s);
+  if (since < threshold) return null;
+  return { since_s: since, usual_s: c.usual_s, threshold_s: threshold, last_arrival: c.last_arrival };
+}
+
+export const overdueText = (o: Overdue): string =>
+  o.last_arrival == null ? "overdue: no dock recorded in the last 24 h" : `overdue: no dock for ${durText(o.since_s)}${o.usual_s != null ? ` (usual ${durText(o.usual_s)})` : ""}`;
+
+/** Stamp overdue onto the report's trains (as a field and an error line) and count them. */
+export function applyOverdue(report: TrainsReport, cadence: Record<string, TrainCadence>, now: number, recording: boolean): TrainsReport {
+  const trains = report.trains.map((t) => {
+    const overdue = overdueOf(t, cadence[t.name], now, recording);
+    return overdue ? { ...t, overdue, errors: [...t.errors, overdueText(overdue)] } : t;
+  });
+  return { ...report, trains, counts: { ...report.counts, overdue: trains.filter((t) => t.overdue).length } };
 }

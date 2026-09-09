@@ -474,6 +474,47 @@ export async function rollupStatus(db: D1Database, now: number): Promise<RollupS
   return { cutoff, raw_rows_past_cutoff: counts.reduce((n, r) => n + Number(r.results[0]?.n ?? 0), 0), newest_hourly_bucket: newest?.b ?? null, oldest_raw_ts: oldest?.t ?? null };
 }
 
+/** How often a train docks, from its recent visits: the baseline the overdue check compares against. */
+export interface TrainCadence {
+  train: string;
+  /** newest arrival inside the window */
+  last_arrival: number;
+  /** arrival-to-arrival intervals seen in the window */
+  intervals: number;
+  /** median interval, or null with fewer than 3 intervals */
+  usual_s: number | null;
+  /** sampler gap ticks after the last arrival, as seconds (5 min each): time the origin was down, not the train */
+  gap_s: number;
+}
+
+export const TICK_SECONDS = 300;
+
+/**
+ * Per-train dock cadence over the trailing window (default 24 h). Two indexed range reads
+ * (train_visits.arrived_ts, gap_samples.ts); the shaping is in JS. Trains with no arrival in
+ * the window are absent, which the overdue check treats as its own signal.
+ */
+export async function readTrainCadence(db: D1Database, now: number, windowS = 24 * 3600): Promise<{ cadence: Record<string, TrainCadence>; visits: number }> {
+  const from = now - windowS;
+  const [rows, gaps] = await Promise.all([
+    all<{ train: string; arrived_ts: number }>(db, "SELECT train, arrived_ts FROM train_visits WHERE arrived_ts BETWEEN ? AND ? ORDER BY train, arrived_ts", from, now),
+    all<{ ts: number }>(db, "SELECT ts FROM gap_samples WHERE ts BETWEEN ? AND ? ORDER BY ts", from, now),
+  ]);
+  const byTrain = new Map<string, number[]>();
+  for (const r of rows) byTrain.set(r.train, [...(byTrain.get(r.train) ?? []), Number(r.arrived_ts)]);
+  const cadence: Record<string, TrainCadence> = {};
+  for (const [train, arrivals] of byTrain) {
+    const ivs = arrivals.slice(1).map((a, i) => a - arrivals[i]).sort((a, b) => a - b);
+    const last = arrivals[arrivals.length - 1];
+    cadence[train] = {
+      train, last_arrival: last, intervals: ivs.length,
+      usual_s: ivs.length >= 3 ? ivs[Math.floor(ivs.length / 2)] : null,
+      gap_s: gaps.filter((g) => Number(g.ts) > last).length * TICK_SECONDS,
+    };
+  }
+  return { cadence, visits: rows.length };
+}
+
 export async function readVisits(db: D1Database, q: { from: number; to: number; station?: string | null; train?: string | null }): Promise<Visit[]> {
   const where: string[] = [], params: unknown[] = [q.from, q.to];
   if (q.station) { where.push("AND station = ? COLLATE NOCASE"); params.push(q.station); }

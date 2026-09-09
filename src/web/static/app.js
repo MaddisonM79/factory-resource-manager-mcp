@@ -19,6 +19,7 @@ const state = {
   tab: stored("tab", "overview"),
   status: null,
   latest: null,
+  alerts: null,        // /api/alerts: the global strip; polled while the page is visible
   hanko: null,
   charts: [],          // live uPlot instances on the current tab, destroyed on re-render
   sel: {},             // per-tab selections (circuit group, item, site, ...)
@@ -264,7 +265,7 @@ const groupLabel = (g) => `Circuit group ${g}`;
 const busiestGroup = () => latestPower().reduce((best, r) => (best == null || Number(r.consumed_mw) > Number(best.consumed_mw) ? r : best), null)?.circuit_group;
 
 async function tabOverview(main) {
-  const L = state.latest ?? {}, S = state.status ?? {};
+  const L = state.latest ?? {}, S = state.status ?? {}, A = state.alerts?.alerts ?? null;
   const power = L.power ?? [], sites = L.sites ?? [], prod = L.prod ?? [], sinks = L.sinks ?? [];
   const sum = (rows, k) => rows.reduce((a, r) => a + Number(r[k] ?? 0), 0);
   const cap = sum(power, "capacity_mw"), cons = sum(power, "consumed_mw"), maxc = sum(power, "max_consumed_mw");
@@ -275,6 +276,7 @@ async function tabOverview(main) {
   const tile = (k, v, unit, d, cls) => el("div", { class: "tile" }, el("div", { class: "k", text: k }), el("div", { class: "v" }, v, unit ? el("small", { text: unit }) : null), d ? el("div", { class: "d " + (cls ?? ""), text: d }) : null);
   main.append(el("div", { class: "tiles" },
     tile("Game", S.reachable ? (S.session?.paused ? "Paused" : "Running") : "Down", "", S.reachable ? `${(S.players ?? []).filter((p) => p.online).length} online` : S.error?.slice(0, 60), S.reachable ? "ok" : "bad"),
+    tile("Alerts", A ? fmtNum(A.length) : "–", "", A ? (A.length ? A.slice(0, 2).map((a) => a.title).join(" · ") + (A.length > 2 ? ` +${A.length - 2}` : "") : "nothing needs attention") : "not loaded", A && A.some((a) => a.level === "bad") ? "bad" : A && A.length ? "warn" : "ok"),
     tile("Objects", S.uobjects ? fmtNum(S.uobjects.count) : "–", "", S.uobjects ? `${fmtPct(S.uobjects.used_pct)} of the engine's ${fmtNum(S.uobjects.capacity)} pool` : "no count from FRM", S.uobjects && S.uobjects.used_pct >= 90 ? "bad" : S.uobjects && S.uobjects.used_pct >= 75 ? "warn" : null),
     tile("Grid draw", fmtMW(cons), "", `of ${fmtMW(cap)} capacity · peak ${fmtMW(maxc)}`, maxc > cap ? "bad" : null),
     tile("Headroom", fmtMW(cap - cons), "", cap ? `${fmtPct(100 * (cap - cons) / cap)} free` : "no capacity", cap - maxc < 0 ? "bad" : null),
@@ -604,6 +606,7 @@ async function tabTrains(main) {
   main.append(el("div", { class: "tiles" },
     tile("Trains", c.trains, `${c.moving} moving · ${c.docked} docked · ${c.stopped} stopped`),
     tile("Derailed", c.derailed, c.derailed ? "needs a visit" : "none", c.derailed ? "bad" : "ok"),
+    tile("Overdue", c.overdue ?? 0, c.overdue ? "no dock within their usual cycle" : "every train on cadence", c.overdue ? "bad" : "ok"),
     tile("Stations", c.stations, `${c.platforms} freight platforms`),
     tile("Signals", c.signals ?? 0, c.signals ? `${c.signalsStop} at stop · ${c.invalidBlocks} invalid block${c.invalidBlocks === 1 ? "" : "s"}` : "none", c.invalidBlocks ? "bad" : null),
     tile("Dock visits", visits.length, `in the last ${state.range}`),
@@ -635,7 +638,7 @@ async function tabTrains(main) {
   if (state.sel.train != null && !r.trains.some((t) => t.name === state.sel.train)) state.sel.train = null;
   const trainCols = [
     { key: "name", label: "Train" },
-    { key: "state", label: "State", render: (t) => el("span", { class: "pill " + STATE_PILL[t.state], text: t.state }) },
+    { key: "state", label: "State", sort: (t) => (t.overdue ? "overdue" : t.state), render: (t) => el("span", { class: "pill " + (t.overdue ? "overdue" : STATE_PILL[t.state]), text: t.overdue ? `${t.state} · overdue` : t.state }) },
     { key: "stop", label: "Stop", sort: (t) => t.nextStop ?? t.station ?? "", render: (t) => (t.state === "docked" ? `at ${t.station ?? "?"}` : `→ ${t.nextStop ?? t.station ?? "?"}`) },
     { key: "speed", label: "km/h", num: true },
     { key: "payloadPct", label: "Payload", num: true, render: (t) => fmtPct(t.payloadPct) },
@@ -913,14 +916,48 @@ async function refreshStatus() {
 async function refreshAll() {
   $("#refresh").disabled = true;
   try {
-    const [status, latest] = await Promise.all([api("/api/status").catch((e) => { if (e instanceof LoginRequired) throw e; return { reachable: false, error: e.message, sampler: {} }; }), api("/api/latest")]);
-    state.status = status; state.latest = latest;
+    const [status, latest, alerts] = await Promise.all([
+      api("/api/status").catch((e) => { if (e instanceof LoginRequired) throw e; return { reachable: false, error: e.message, sampler: {} }; }),
+      api("/api/latest"),
+      api("/api/alerts").catch((e) => { if (e instanceof LoginRequired) throw e; return { alerts: [{ level: "warn", id: "alerts", title: "Alerts unavailable", detail: e.message, tab: "admin" }] }; }),
+    ]);
+    state.status = status; state.latest = latest; state.alerts = alerts;
     renderStatus();
+    renderAlerts();
     await renderTab();
   } catch (e) {
     if (e instanceof LoginRequired) showLogin(); else $("#main").replaceChildren(el("div", { class: "empty error", text: `Failed to load: ${e.message}` }));
   } finally { $("#refresh").disabled = false; }
 }
+
+// ---------------------------------------------------------------- alerts
+
+const ALERTS_POLL_MS = 60_000;
+
+function renderAlerts() {
+  const host = $("#alerts");
+  const alerts = state.alerts?.alerts ?? [];
+  if (!alerts.length) { host.hidden = true; host.replaceChildren(); return; }
+  const bad = alerts.filter((a) => a.level === "bad").length;
+  host.className = "alerts" + (bad ? "" : " quiet");
+  host.replaceChildren(
+    el("span", { class: "count", text: bad ? `${bad} alert${bad === 1 ? "" : "s"}${alerts.length > bad ? ` · ${alerts.length - bad} warning${alerts.length - bad === 1 ? "" : "s"}` : ""}` : `${alerts.length} warning${alerts.length === 1 ? "" : "s"}` }),
+    ...alerts.map((a) => el("button", { type: "button", class: "alert " + a.level, title: `${a.title}: ${a.detail}`, onclick: () => { if (state.tab !== a.tab) { state.tab = a.tab; store("tab", a.tab); renderControls(); } renderTab(); } },
+      el("span", { class: "t", text: a.title }), el("span", { class: "d", text: a.detail }))),
+  );
+  host.hidden = false;
+}
+
+async function refreshAlerts() {
+  try { state.alerts = await api("/api/alerts"); } catch (e) { if (e instanceof LoginRequired) return showLogin(); state.alerts = { alerts: [{ level: "warn", id: "alerts", title: "Alerts unavailable", detail: e.message, tab: "admin" }] }; }
+  renderAlerts();
+  // The overview's Alerts tile reads the same list.
+  if (state.tab === "overview") renderTab();
+}
+
+// Poll while the page is visible; a hidden tab neither hits the origin nor drifts stale.
+setInterval(() => { if (document.visibilityState === "visible" && state.status) refreshAlerts(); }, ALERTS_POLL_MS);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.status) refreshAlerts(); });
 
 // ---------------------------------------------------------------- auth
 

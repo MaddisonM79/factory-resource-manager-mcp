@@ -15,7 +15,8 @@ import {
 } from "../../frm/client.ts";
 
 import { pipeReport } from "../pipes.ts";
-import { signalRows } from "../../frm/trains.ts";
+import { signalRows, trainsReport, applyOverdue } from "../../frm/trains.ts";
+import { readTrainCadence } from "../../history/store.ts";
 import { guard, inv } from "../shared.ts";
 
 const BELT_CAP: Record<number, number> = { 1: 60, 2: 120, 3: 270, 4: 480, 5: 780, 6: 1200 };
@@ -83,6 +84,8 @@ export function registerLogistics(server: McpServer, env: Env): void {
     {
       description:
         "Trains, drones, trucks and their stations: where each vehicle is, what it's carrying, per-platform load/unload state, and anything derailed or stuck. " +
+        "A train is overdue when it has gone without docking for twice its own median dock interval (from D1 history; sampler gaps excluded), " +
+        "which catches two trains deadlocked at a path signal, a state FRM itself reports as healthy. " +
         "Trains also bring rail signals: aspect (Clear/Stop/Dock) and block validity, invalid blocks first. " +
         "Drone ports carry FRM's own telemetry: status, averaged items/min in and out, estimated transport rate, round-trip times, items per trip, " +
         "and the active fuel's cost per trip, so 'is this route keeping up?' is answered with numbers.",
@@ -95,9 +98,15 @@ export function registerLogistics(server: McpServer, env: Env): void {
       guard(async () => {
         const out: Record<string, unknown> = {};
         if (include.includes("trains")) {
-          const [trains, stations, signalsRaw] = await Promise.all([
+          const now = Math.floor(Date.now() / 1000);
+          const [trains, stations, signalsRaw, cad] = await Promise.all([
             frmGet(env, "getTrains"), frmGet(env, "getTrainStation"), frmGet(env, "getTrainSignals").catch(() => null),
+            readTrainCadence(env.DB, now).catch(() => ({ cadence: {}, visits: 0 })),
           ]);
+          // Overdue against each train's own dock cadence (D1): a stuck train reports no error to FRM.
+          const judged = applyOverdue(trainsReport(trains, stations, signalsRaw), cad.cadence, now, cad.visits > 0);
+          const byName = new Map(judged.trains.map((t) => [t.name, t]));
+          out.overdueTrains = judged.trains.filter((t) => t.overdue).map((t) => ({ name: t.name, sinceMin: Math.round(t.overdue!.since_s / 60), usualMin: t.overdue!.usual_s == null ? null : Math.round(t.overdue!.usual_s / 60), headingTo: t.nextStop }));
           out.trains = asArray(trains).slice(0, limit).map((t) => {
             // Cargo lives on each wagon under Vehicles[].Inventory; roll it up by item.
             const cargo = new Map<string, number>();
@@ -105,6 +114,7 @@ export function registerLogistics(server: McpServer, env: Env): void {
             return {
               name: t.Name,
               status: t.Status,
+              errors: byName.get(String(t.Name ?? ""))?.errors ?? [],
               speed: Math.round(num(t.ForwardSpeed)),
               derailed: !!t.Derailed,
               pendingDerail: !!t.PendingDerail,
