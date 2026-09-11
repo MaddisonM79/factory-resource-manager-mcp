@@ -27,9 +27,11 @@
     { "binding": "DB", "database_name": "frm-history", "database_id": "490f5c59-4d89-41b8-beb5-8905907a4c73", "migrations_dir": "migrations" }
   ],
   "vars": {
-    // FRM on the dedicated server (laptop), behind the `frm-laptop` Cloudflare Tunnel + Access
-    // app `frm-laptop` (Service Auth). A first-level name: the tunnel's CNAME relies on
-    // Universal SSL, which does not cover deeper subdomains.
+    // FRM origin hostname. No tunnel is behind it right now: the laptop dedicated server and
+    // its `frm-laptop` tunnel/Access app were torn down 2026-09-11, and the origin will come back
+    // on Shadow later under this same name. Until then the Worker reports "Game server
+    // unreachable" and serves history from KV/D1. Keep it a first-level name: the tunnel's
+    // CNAME relies on Universal SSL, which does not cover deeper subdomains.
     "FRM_BASE_URL": "https://frm.lmam.tech",
     "FRM_ALLOW_WRITE": "true",
     "MCP_HOSTS": "mcp.frm.hosted.lmam.tech",
@@ -38,7 +40,7 @@
     "DASH_ALLOWED_EMAILS": "nerdy.maddison@gmail.com"
   }
   // Secrets (wrangler secret put):
-  //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access); op://frm/frm-service-token-laptop
+  //   CF_ACCESS_CLIENT_ID      Access service token id (ends in .access); re-put when the Shadow tunnel + Access app exist
   //   CF_ACCESS_CLIENT_SECRET  Access service token secret; same 1Password item
   //   ADMIN_PASSPHRASE         passphrase for the OAuth approval page
   //   FRM_API_KEY              optional; FRM's own key, only needed for write endpoints
